@@ -1,805 +1,755 @@
--- SGT Enterprise
--- Modelo inicial PostgreSQL / Supabase
--- Gerado a partir do modelo de dados efetivamente usado pelo HTML enviado.
---
--- IMPORTANTE:
--- 1) Execute no SQL Editor do Supabase.
--- 2) As tabelas ficam protegidas por RLS.
--- 3) A autenticação será configurada na próxima etapa; por enquanto
---    as políticas de aplicação ficam separadas para não abrir o banco.
-
-create extension if not exists pgcrypto;
-
-create table if not exists public.impressoras (
-  id uuid primary key default gen_random_uuid(),
-  setor text not null,
-  fabricante text not null,
-  modelo text not null,
-  nome_exibicao text not null,
-  cor_tipo text,
-  status text not null default 'EM USO',
-  ip text,
-  mac text,
-  numero_serie text,
-  patrimonio text,
-  localizacao text,
-  observacoes text,
-  ativo boolean not null default true,
-  criado_em timestamptz not null default now(),
-  atualizado_em timestamptz not null default now()
-);
-
-create unique index if not exists ux_impressoras_numero_serie
-  on public.impressoras (numero_serie)
-  where numero_serie is not null and numero_serie <> '';
-
-create table if not exists public.solicitacoes (
-  id uuid primary key default gen_random_uuid(),
-  impressora_id uuid not null references public.impressoras(id),
-  toner_modelo text not null,
-  nome_suprimento text,
-  status text not null default 'PENDENTE',
-  responsavel text,
-  observacoes text,
-  data_solicitacao date not null default current_date,
-  data_analise date,
-  motivo_negativa text,
-  deletado boolean not null default false,
-  data_delecao timestamptz,
-  data_edicao timestamptz,
-  criado_em timestamptz not null default now(),
-  atualizado_em timestamptz not null default now()
-);
-
-create index if not exists ix_solicitacoes_impressora
-  on public.solicitacoes (impressora_id);
-
-create index if not exists ix_solicitacoes_status
-  on public.solicitacoes (status);
-
-create table if not exists public.justificativas (
-  id uuid primary key default gen_random_uuid(),
-  impressora_id uuid not null references public.impressoras(id),
-  nome_suprimento text,
-  toner_modelo text,
-  cor_negada text,
-  vida_util_copias integer not null default 0,
-  contador_atual integer not null default 0,
-  ultima_troca_req integer not null default 0,
-  data_ultima_troca date,
-  saldo_produzido numeric(14,2) not null default 0,
-  pct_produzido numeric(8,2) not null default 0,
-  pct_permitido numeric(8,2) not null default 0,
-  pct_faltante numeric(8,2) not null default 0,
-  copias_faltantes numeric(14,2) not null default 0,
-  previsao_nova_tentativa date,
-  status text,
-  tipo_analise text,
-  motivo_negativa text,
-  responsavel text,
-  data_solicitacao date,
-  data_analise date,
-  observacoes text,
-  deletado boolean not null default false,
-  data_delecao timestamptz,
-  data_edicao timestamptz,
-  criado_em timestamptz not null default now(),
-  atualizado_em timestamptz not null default now()
-);
-
-create index if not exists ix_justificativas_impressora
-  on public.justificativas (impressora_id);
-
-create table if not exists public.movimentacoes_estoque (
-  id uuid primary key default gen_random_uuid(),
-  impressora_id uuid not null references public.impressoras(id),
-  toner_modelo text not null,
-  nome_suprimento text,
-  cor text,
-  entrada integer not null default 0,
-  saida integer not null default 0,
-  data_movimentacao timestamptz not null default now(),
-  ref_solicitacao_id uuid references public.solicitacoes(id),
-  observacoes text,
-  deletado boolean not null default false,
-  data_delecao timestamptz,
-  data_edicao timestamptz,
-  criado_em timestamptz not null default now(),
-  atualizado_em timestamptz not null default now(),
-  constraint ck_movimentacao_quantidade check (
-    entrada >= 0 and saida >= 0 and (entrada > 0 or saida > 0)
-  )
-);
-
-create index if not exists ix_estoque_impressora
-  on public.movimentacoes_estoque (impressora_id);
-
-create index if not exists ix_estoque_toner
-  on public.movimentacoes_estoque (toner_modelo);
-
-create table if not exists public.historico (
-  id uuid primary key default gen_random_uuid(),
-  impressora_id uuid references public.impressoras(id),
-  solicitacao_id uuid references public.solicitacoes(id),
-  justificativa_id uuid references public.justificativas(id),
-  nome_suprimento text,
-  status_anterior text,
-  novo_status text,
-  motivo_negativa text,
-  responsavel text,
-  observacoes text,
-  tipo_evento text,
-  data_evento timestamptz not null default now(),
-  deletado boolean not null default false,
-  data_delecao timestamptz,
-  data_edicao timestamptz,
-  criado_em timestamptz not null default now(),
-  atualizado_em timestamptz not null default now()
-);
-
-create index if not exists ix_historico_impressora
-  on public.historico (impressora_id);
-
-create index if not exists ix_historico_data
-  on public.historico (data_evento desc);
-
-create table if not exists public.configuracoes (
-  id integer primary key default 1,
-  intervalo_min integer not null default 15,
-  janela_seg integer not null default 7,
-  peso_neg integer not null default 5,
-  limite_risco integer not null default 3,
-  consumo_medio integer not null default 60,
-  regra_tentativa integer not null default 30,
-  atualizado_em timestamptz not null default now(),
-  constraint ck_config_id check (id = 1)
-);
-
-insert into public.configuracoes (id)
-values (1)
-on conflict (id) do nothing;
-
--- Função simples para manter atualizado_em.
-create or replace function public.set_atualizado_em()
-returns trigger
-language plpgsql
-as $$
-begin
-  new.atualizado_em = now();
-  return new;
-end;
-$$;
-
-drop trigger if exists trg_impressoras_atualizado_em on public.impressoras;
-create trigger trg_impressoras_atualizado_em
-before update on public.impressoras
-for each row execute function public.set_atualizado_em();
-
-drop trigger if exists trg_solicitacoes_atualizado_em on public.solicitacoes;
-create trigger trg_solicitacoes_atualizado_em
-before update on public.solicitacoes
-for each row execute function public.set_atualizado_em();
-
-drop trigger if exists trg_justificativas_atualizado_em on public.justificativas;
-create trigger trg_justificativas_atualizado_em
-before update on public.justificativas
-for each row execute function public.set_atualizado_em();
-
-drop trigger if exists trg_estoque_atualizado_em on public.movimentacoes_estoque;
-create trigger trg_estoque_atualizado_em
-before update on public.movimentacoes_estoque
-for each row execute function public.set_atualizado_em();
-
-drop trigger if exists trg_historico_atualizado_em on public.historico;
-create trigger trg_historico_atualizado_em
-before update on public.historico
-for each row execute function public.set_atualizado_em();
-
-drop trigger if exists trg_configuracoes_atualizado_em on public.configuracoes;
-create trigger trg_configuracoes_atualizado_em
-before update on public.configuracoes
-for each row execute function public.set_atualizado_em();
-
--- View para o saldo atual de estoque.
-create or replace view public.saldo_estoque as
-select
-  m.impressora_id,
-  m.toner_modelo,
-  coalesce(m.cor, '') as cor,
-  sum(m.entrada) as entradas,
-  sum(m.saida) as saidas,
-  sum(m.entrada - m.saida) as saldo
-from public.movimentacoes_estoque m
-where not m.deletado
-group by m.impressora_id, m.toner_modelo, coalesce(m.cor, '');
-
--- RLS: nenhuma tabela exposta fica aberta por padrão.
-alter table public.impressoras enable row level security;
-alter table public.solicitacoes enable row level security;
-alter table public.justificativas enable row level security;
-alter table public.movimentacoes_estoque enable row level security;
-alter table public.historico enable row level security;
-alter table public.configuracoes enable row level security;
-
--- Não criamos políticas anon ainda.
--- A próxima etapa configura Supabase Auth + políticas para o usuário autenticado.
--- Isso evita colocar o banco inteiro publicamente acessível no GitHub Pages.
-
--- Dados iniciais de configuração usados pelo sistema atual:
-update public.configuracoes
-set intervalo_min = 15,
-    janela_seg = 7,
-    peso_neg = 5,
-    limite_risco = 3,
-    consumo_medio = 60,
-    regra_tentativa = 30
-where id = 1;
-
-
-
-ALTER TABLE public.solicitacoes ADD COLUMN IF NOT EXISTS cor text;
-
-
--- ============================================================
--- ACESSO DA API — USUÁRIOS AUTENTICADOS
--- ============================================================
-GRANT USAGE ON SCHEMA public TO authenticated;
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.impressoras TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.solicitacoes TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.justificativas TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.movimentacoes_estoque TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.historico TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.configuracoes TO authenticated;
-
-DO $$
-DECLARE t text;
-BEGIN
-  FOREACH t IN ARRAY ARRAY['impressoras','solicitacoes','justificativas','movimentacoes_estoque','historico','configuracoes'] LOOP
-    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
-    EXECUTE format('DROP POLICY IF EXISTS "SGT authenticated access" ON public.%I', t);
-    EXECUTE format('CREATE POLICY "SGT authenticated access" ON public.%I FOR ALL TO authenticated USING (true) WITH CHECK (true)', t);
-  END LOOP;
-END $$;
-
--- SGT Enterprise — estoque atual independente do histórico + Realtime
--- Versão corrigida: evita blocos IF soltos no SQL Editor.
-
-create table if not exists public.estoque_atual (
-  id uuid primary key default gen_random_uuid(),
-  impressora_id uuid not null references public.impressoras(id) on delete cascade,
-  cor text not null check (cor in ('CIANO','MAGENTA','AMARELO','PRETO')),
-  quantidade integer not null default 0 check (quantidade >= 0),
-  atualizado_em timestamptz not null default now(),
-  unique (impressora_id, cor)
-);
-
-alter table public.estoque_atual enable row level security;
-grant select, insert, update, delete on table public.estoque_atual to authenticated;
-
-drop policy if exists "SGT authenticated access" on public.estoque_atual;
-create policy "SGT authenticated access" on public.estoque_atual
-for all to authenticated
-using (true)
-with check (true);
-
--- Reconstrói o estoque atual a partir das movimentações existentes.
--- O histórico pode depois ser excluído sem alterar estes saldos.
-truncate table public.estoque_atual;
-
-insert into public.estoque_atual (impressora_id, cor, quantidade)
-select
-  impressora_id,
-  upper(cor) as cor,
-  greatest(0, sum(coalesce(entrada,0) - coalesce(saida,0)))::integer as quantidade
-from public.movimentacoes_estoque
-where cor is not null
-  and upper(cor) in ('CIANO','MAGENTA','AMARELO','PRETO')
-group by impressora_id, upper(cor)
-having greatest(0, sum(coalesce(entrada,0) - coalesce(saida,0))) > 0;
-
-create or replace function public.sgt_atualizar_estoque_atual()
-returns trigger
-language plpgsql
-security definer
-set search_path = public
-as $function$
-declare
-  delta_old integer := 0;
-  delta_new integer := 0;
-begin
-  -- Alteração: retira do saldo o efeito do registro antigo.
-  if TG_OP = 'UPDATE' then
-    if OLD.cor is not null then
-      delta_old := coalesce(OLD.entrada,0) - coalesce(OLD.saida,0);
-      if delta_old <> 0 then
-        insert into public.estoque_atual (impressora_id, cor, quantidade, atualizado_em)
-        values (OLD.impressora_id, upper(OLD.cor), 0, now())
-        on conflict (impressora_id, cor) do nothing;
-
-        update public.estoque_atual
-           set quantidade = greatest(0, quantidade - delta_old),
-               atualizado_em = now()
-         where impressora_id = OLD.impressora_id
-           and cor = upper(OLD.cor);
-      end if;
-    end if;
-  end if;
-
-  -- Entrada ou alteração: aplica o efeito do novo registro.
-  if TG_OP in ('INSERT','UPDATE') then
-    if NEW.cor is not null then
-      delta_new := coalesce(NEW.entrada,0) - coalesce(NEW.saida,0);
-      if delta_new <> 0 then
-        insert into public.estoque_atual (impressora_id, cor, quantidade, atualizado_em)
-        values (NEW.impressora_id, upper(NEW.cor), 0, now())
-        on conflict (impressora_id, cor) do nothing;
-
-        update public.estoque_atual
-           set quantidade = greatest(0, quantidade + delta_new),
-               atualizado_em = now()
-         where impressora_id = NEW.impressora_id
-           and cor = upper(NEW.cor);
-      end if;
-    end if;
-  end if;
-
-  -- DELETE não possui trigger de propósito: apagar histórico não altera estoque atual.
-  return coalesce(NEW, OLD);
-end;
-$function$;
-
-drop trigger if exists trg_sgt_atualizar_estoque_atual on public.movimentacoes_estoque;
-create trigger trg_sgt_atualizar_estoque_atual
-after insert or update on public.movimentacoes_estoque
-for each row execute function public.sgt_atualizar_estoque_atual();
-
--- Realtime: execute estas linhas somente se as tabelas ainda não estiverem
--- adicionadas à publicação supabase_realtime.
--- Se alguma já estiver publicada, o Supabase informará que ela já existe;
--- isso não afeta a tabela estoque_atual.
-
-DO $$ BEGIN
-  ALTER PUBLICATION supabase_realtime ADD TABLE public.estoque_atual;
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-notify pgrst, 'reload schema';
-
--- SGT Enterprise — Contadores contínuos e ciclos de toner
--- Executar após o schema principal e o estoque_atual.
-
-ALTER TABLE public.solicitacoes
-  ADD COLUMN IF NOT EXISTS contador_atual integer;
-ALTER TABLE public.solicitacoes
-  ADD COLUMN IF NOT EXISTS contador_solicitacao integer;
-ALTER TABLE public.solicitacoes
-  ADD COLUMN IF NOT EXISTS contador_recebimento integer;
-
-CREATE TABLE IF NOT EXISTS public.leituras_contador (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  impressora_id uuid NOT NULL REFERENCES public.impressoras(id) ON DELETE CASCADE,
-  cor text NOT NULL CHECK (cor IN ('CIANO','MAGENTA','AMARELO','PRETO')),
-  contador integer NOT NULL CHECK (contador >= 0),
-  origem_tipo text NOT NULL CHECK (origem_tipo IN ('SOLICITACAO','RECEBIMENTO','JUSTIFICATIVA','MANUAL')),
-  origem_id uuid,
-  status_origem text,
-  data_leitura timestamptz NOT NULL DEFAULT now(),
-  observacoes text,
-  criado_em timestamptz NOT NULL DEFAULT now(),
-  atualizado_em timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (origem_tipo, origem_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_leituras_contador_impressora_cor_data
-  ON public.leituras_contador(impressora_id, cor, data_leitura DESC);
-
-CREATE TABLE IF NOT EXISTS public.ciclos_toner (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  impressora_id uuid NOT NULL REFERENCES public.impressoras(id) ON DELETE CASCADE,
-  cor text NOT NULL CHECK (cor IN ('CIANO','MAGENTA','AMARELO','PRETO')),
-  solicitacao_recebida_id uuid NOT NULL REFERENCES public.solicitacoes(id) ON DELETE CASCADE,
-  leitura_inicio_id uuid REFERENCES public.leituras_contador(id) ON DELETE SET NULL,
-  leitura_fim_id uuid REFERENCES public.leituras_contador(id) ON DELETE SET NULL,
-  contador_inicio integer,
-  contador_fim integer NOT NULL CHECK (contador_fim >= 0),
-  copias_produzidas integer,
-  data_inicio timestamptz,
-  data_fim timestamptz NOT NULL,
-  dias_duracao numeric(12,2),
-  observacoes text,
-  criado_em timestamptz NOT NULL DEFAULT now(),
-  atualizado_em timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (solicitacao_recebida_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_ciclos_toner_impressora_cor_data
-  ON public.ciclos_toner(impressora_id, cor, data_fim DESC);
-
-CREATE OR REPLACE FUNCTION public.sgt_touch_atualizado_em()
-RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  NEW.atualizado_em := now();
-  RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_leituras_contador_updated_at ON public.leituras_contador;
-CREATE TRIGGER trg_leituras_contador_updated_at
-BEFORE UPDATE ON public.leituras_contador
-FOR EACH ROW EXECUTE FUNCTION public.sgt_touch_atualizado_em();
-
-DROP TRIGGER IF EXISTS trg_ciclos_toner_updated_at ON public.ciclos_toner;
-CREATE TRIGGER trg_ciclos_toner_updated_at
-BEFORE UPDATE ON public.ciclos_toner
-FOR EACH ROW EXECUTE FUNCTION public.sgt_touch_atualizado_em();
-
-CREATE OR REPLACE FUNCTION public.sgt_registrar_leitura_solicitacao()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE
-  leitura_solicitacao_id uuid;
-  leitura_recebimento_id uuid;
-  anterior record;
-  copias integer;
-  dias numeric(12,2);
-  contador_req integer;
-  contador_rec integer;
-BEGIN
-  IF NEW.deletado IS TRUE THEN
-    RETURN NEW;
-  END IF;
-
-  contador_req := COALESCE(NEW.contador_solicitacao, NEW.contador_atual);
-  contador_rec := NEW.contador_recebimento;
-
-  -- A leitura do pedido fica preservada separadamente da leitura da troca.
-  IF contador_req IS NOT NULL
-     AND contador_req >= 0
-     AND NEW.cor IS NOT NULL
-     AND NEW.impressora_id IS NOT NULL THEN
-    INSERT INTO public.leituras_contador
-      (impressora_id, cor, contador, origem_tipo, origem_id, status_origem, data_leitura)
-    VALUES
-      (NEW.impressora_id, NEW.cor, contador_req, 'SOLICITACAO', NEW.id, NEW.status,
-       COALESCE(NEW.data_solicitacao::timestamptz, now()))
-    ON CONFLICT (origem_tipo, origem_id) DO UPDATE SET
-      impressora_id = EXCLUDED.impressora_id,
-      cor = EXCLUDED.cor,
-      contador = EXCLUDED.contador,
-      status_origem = EXCLUDED.status_origem,
-      data_leitura = EXCLUDED.data_leitura;
-
-    SELECT id INTO leitura_solicitacao_id
-      FROM public.leituras_contador
-     WHERE origem_tipo='SOLICITACAO' AND origem_id=NEW.id;
-  END IF;
-
-  -- O recebimento é uma segunda leitura, nunca substitui a leitura do pedido.
-  IF NEW.status = 'RECEBIDO'
-     AND contador_rec IS NOT NULL
-     AND contador_rec >= 0
-     AND NEW.cor IS NOT NULL
-     AND NEW.impressora_id IS NOT NULL THEN
-
-    INSERT INTO public.leituras_contador
-      (impressora_id, cor, contador, origem_tipo, origem_id, status_origem, data_leitura)
-    VALUES
-      (NEW.impressora_id, NEW.cor, contador_rec, 'RECEBIMENTO', NEW.id, NEW.status,
-       COALESCE(NEW.data_analise::timestamptz, now()))
-    ON CONFLICT (origem_tipo, origem_id) DO UPDATE SET
-      impressora_id = EXCLUDED.impressora_id,
-      cor = EXCLUDED.cor,
-      contador = EXCLUDED.contador,
-      status_origem = EXCLUDED.status_origem,
-      data_leitura = EXCLUDED.data_leitura;
-
-    SELECT id INTO leitura_recebimento_id
-      FROM public.leituras_contador
-     WHERE origem_tipo='RECEBIMENTO' AND origem_id=NEW.id;
-
-    SELECT s.id,
-           s.contador_recebimento,
-           s.data_analise,
-           lc.id AS leitura_id
-      INTO anterior
-      FROM public.solicitacoes s
-      LEFT JOIN public.leituras_contador lc
-        ON lc.origem_tipo='RECEBIMENTO' AND lc.origem_id=s.id
-     WHERE s.impressora_id=NEW.impressora_id
-       AND s.cor=NEW.cor
-       AND s.status='RECEBIDO'
-       AND s.deletado IS NOT TRUE
-       AND s.id<>NEW.id
-       AND s.contador_recebimento IS NOT NULL
-       AND s.contador_recebimento <= contador_rec
-       AND (s.data_analise < NEW.data_analise OR (s.data_analise = NEW.data_analise AND s.id < NEW.id))
-     ORDER BY s.data_analise DESC NULLS LAST, s.id DESC
-     LIMIT 1;
-
-    IF anterior.id IS NOT NULL THEN
-      copias := contador_rec - anterior.contador_recebimento;
-      dias := GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(NEW.data_analise::timestamptz, now()) - COALESCE(anterior.data_analise::timestamptz, now()))) / 86400.0);
-    ELSE
-      copias := NULL;
-      dias := NULL;
-    END IF;
-
-    INSERT INTO public.ciclos_toner
-      (impressora_id, cor, solicitacao_recebida_id, leitura_inicio_id, leitura_fim_id,
-       contador_inicio, contador_fim, copias_produzidas, data_inicio, data_fim, dias_duracao)
-    VALUES
-      (NEW.impressora_id, NEW.cor, NEW.id, anterior.leitura_id, leitura_recebimento_id,
-       anterior.contador_recebimento, contador_rec, copias,
-       anterior.data_analise::timestamptz, COALESCE(NEW.data_analise::timestamptz, now()), dias)
-    ON CONFLICT (solicitacao_recebida_id) DO UPDATE SET
-      leitura_inicio_id=EXCLUDED.leitura_inicio_id,
-      leitura_fim_id=EXCLUDED.leitura_fim_id,
-      contador_inicio=EXCLUDED.contador_inicio,
-      contador_fim=EXCLUDED.contador_fim,
-      copias_produzidas=EXCLUDED.copias_produzidas,
-      data_inicio=EXCLUDED.data_inicio,
-      data_fim=EXCLUDED.data_fim,
-      dias_duracao=EXCLUDED.dias_duracao;
-  END IF;
-
-  RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_sgt_contador_solicitacao ON public.solicitacoes;
-CREATE TRIGGER trg_sgt_contador_solicitacao
-AFTER INSERT OR UPDATE OF contador_atual, contador_solicitacao, contador_recebimento, cor, status, data_analise, data_solicitacao, deletado
-ON public.solicitacoes
-FOR EACH ROW EXECUTE FUNCTION public.sgt_registrar_leitura_solicitacao();
-
-CREATE OR REPLACE FUNCTION public.sgt_registrar_leitura_justificativa()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-BEGIN
-  IF NEW.deletado IS NOT TRUE
-     AND NEW.contador_atual IS NOT NULL
-     AND NEW.contador_atual >= 0
-     AND NEW.cor_negada IS NOT NULL
-     AND NEW.impressora_id IS NOT NULL THEN
-    INSERT INTO public.leituras_contador
-      (impressora_id, cor, contador, origem_tipo, origem_id, status_origem, data_leitura)
-    VALUES
-      (NEW.impressora_id, NEW.cor_negada, NEW.contador_atual, 'JUSTIFICATIVA', NEW.id, NEW.status, COALESCE(NEW.data_analise::timestamptz, NEW.data_solicitacao::timestamptz, now()))
-    ON CONFLICT (origem_tipo, origem_id) DO UPDATE SET
-      impressora_id=EXCLUDED.impressora_id,
-      cor=EXCLUDED.cor,
-      contador=EXCLUDED.contador,
-      status_origem=EXCLUDED.status_origem,
-      data_leitura=EXCLUDED.data_leitura;
-  END IF;
-  RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_sgt_contador_justificativa ON public.justificativas;
-CREATE TRIGGER trg_sgt_contador_justificativa
-AFTER INSERT OR UPDATE OF contador_atual, cor_negada, status, data_analise, data_solicitacao, deletado
-ON public.justificativas
-FOR EACH ROW EXECUTE FUNCTION public.sgt_registrar_leitura_justificativa();
-
-ALTER TABLE public.leituras_contador ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.ciclos_toner ENABLE ROW LEVEL SECURITY;
-GRANT USAGE ON SCHEMA public TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.leituras_contador TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.ciclos_toner TO authenticated;
-DROP POLICY IF EXISTS "SGT authenticated access" ON public.leituras_contador;
-DROP POLICY IF EXISTS "SGT authenticated access" ON public.ciclos_toner;
-CREATE POLICY "SGT authenticated access" ON public.leituras_contador FOR ALL TO authenticated USING (true) WITH CHECK (true);
-CREATE POLICY "SGT authenticated access" ON public.ciclos_toner FOR ALL TO authenticated USING (true) WITH CHECK (true);
-GRANT EXECUTE ON FUNCTION public.sgt_registrar_leitura_solicitacao() TO authenticated;
-GRANT EXECUTE ON FUNCTION public.sgt_registrar_leitura_justificativa() TO authenticated;
-
-ALTER TABLE public.leituras_contador REPLICA IDENTITY FULL;
-ALTER TABLE public.ciclos_toner REPLICA IDENTITY FULL;
-DO $$ BEGIN
-  ALTER PUBLICATION supabase_realtime ADD TABLE public.leituras_contador;
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  ALTER PUBLICATION supabase_realtime ADD TABLE public.ciclos_toner;
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-NOTIFY pgrst, 'reload schema';
-
--- SGT Enterprise — Registro de troca real e previsão por histórico
--- Executar após 08-contadores-e-ciclos.sql
-
-ALTER TABLE public.leituras_contador
-  DROP CONSTRAINT IF EXISTS leituras_contador_origem_tipo_check;
-
-ALTER TABLE public.leituras_contador
-  ADD CONSTRAINT leituras_contador_origem_tipo_check
-  CHECK (origem_tipo IN ('SOLICITACAO','RECEBIMENTO','JUSTIFICATIVA','TROCA','MANUAL'));
-
-CREATE TABLE IF NOT EXISTS public.trocas_toner (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  impressora_id uuid NOT NULL REFERENCES public.impressoras(id) ON DELETE CASCADE,
-  cor text NOT NULL CHECK (cor IN ('CIANO','MAGENTA','AMARELO','PRETO')),
-  data_troca timestamptz NOT NULL,
-  contador_troca integer CHECK (contador_troca IS NULL OR contador_troca >= 0),
-  solicitacao_id uuid REFERENCES public.solicitacoes(id) ON DELETE SET NULL,
-  observacoes text,
-  deletado boolean NOT NULL DEFAULT false,
-  data_delecao timestamptz,
-  criado_em timestamptz NOT NULL DEFAULT now(),
-  atualizado_em timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_trocas_toner_impressora_cor_data
-  ON public.trocas_toner(impressora_id, cor, data_troca DESC);
-
-ALTER TABLE public.ciclos_toner
-  ALTER COLUMN solicitacao_recebida_id DROP NOT NULL;
-
-ALTER TABLE public.ciclos_toner
-  ADD COLUMN IF NOT EXISTS troca_inicio_id uuid REFERENCES public.trocas_toner(id) ON DELETE SET NULL;
-
-ALTER TABLE public.ciclos_toner
-  ADD COLUMN IF NOT EXISTS troca_fim_id uuid REFERENCES public.trocas_toner(id) ON DELETE SET NULL;
-
-ALTER TABLE public.ciclos_toner
-  ADD COLUMN IF NOT EXISTS tipo_ciclo text NOT NULL DEFAULT 'RECEBIMENTO';
-
-ALTER TABLE public.ciclos_toner
-  ADD COLUMN IF NOT EXISTS deletado boolean NOT NULL DEFAULT false;
-
-ALTER TABLE public.ciclos_toner
-  ADD COLUMN IF NOT EXISTS data_delecao timestamptz;
-
-CREATE UNIQUE INDEX IF NOT EXISTS uq_ciclos_toner_troca_fim
-  ON public.ciclos_toner(troca_fim_id)
-  WHERE troca_fim_id IS NOT NULL;
-
-DROP TRIGGER IF EXISTS trg_trocas_toner_updated_at ON public.trocas_toner;
-CREATE TRIGGER trg_trocas_toner_updated_at
-BEFORE UPDATE ON public.trocas_toner
-FOR EACH ROW EXECUTE FUNCTION public.sgt_touch_atualizado_em();
-
-CREATE OR REPLACE FUNCTION public.sgt_registrar_troca_toner()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE
-  leitura_troca_id uuid;
-  anterior record;
-  ciclo_existente uuid;
-  copias integer;
-  dias numeric(12,2);
-BEGIN
-  IF NEW.deletado IS TRUE THEN
-    UPDATE public.ciclos_toner
-       SET deletado=true, data_delecao=COALESCE(NEW.data_delecao, now())
-     WHERE troca_fim_id=NEW.id;
-    RETURN NEW;
-  END IF;
-
-  UPDATE public.ciclos_toner
-     SET deletado=false, data_delecao=NULL
-   WHERE troca_fim_id=NEW.id;
-
-  IF NEW.contador_troca IS NOT NULL THEN
-    INSERT INTO public.leituras_contador
-      (impressora_id, cor, contador, origem_tipo, origem_id, status_origem, data_leitura, observacoes)
-    VALUES
-      (NEW.impressora_id, NEW.cor, NEW.contador_troca, 'TROCA', NEW.id, 'TROCA', NEW.data_troca, NEW.observacoes)
-    ON CONFLICT (origem_tipo, origem_id) DO UPDATE SET
-      impressora_id=EXCLUDED.impressora_id,
-      cor=EXCLUDED.cor,
-      contador=EXCLUDED.contador,
-      status_origem=EXCLUDED.status_origem,
-      data_leitura=EXCLUDED.data_leitura,
-      observacoes=EXCLUDED.observacoes;
-
-    SELECT id INTO leitura_troca_id
-      FROM public.leituras_contador
-     WHERE origem_tipo='TROCA' AND origem_id=NEW.id;
-  END IF;
-
-  SELECT t.id, t.data_troca, t.contador_troca, lc.id AS leitura_id
-    INTO anterior
-    FROM public.trocas_toner t
-    LEFT JOIN public.leituras_contador lc
-      ON lc.origem_tipo='TROCA' AND lc.origem_id=t.id
-   WHERE t.impressora_id=NEW.impressora_id
-     AND t.cor=NEW.cor
-     AND t.deletado IS NOT TRUE
-     AND t.id<>NEW.id
-     AND t.data_troca <= NEW.data_troca
-   ORDER BY t.data_troca DESC, t.id DESC
-   LIMIT 1;
-
-  IF anterior.id IS NOT NULL THEN
-    IF NEW.contador_troca IS NOT NULL AND anterior.contador_troca IS NOT NULL
-       AND NEW.contador_troca >= anterior.contador_troca THEN
-      copias := NEW.contador_troca - anterior.contador_troca;
-    ELSE
-      copias := NULL;
-    END IF;
-
-    dias := GREATEST(0, EXTRACT(EPOCH FROM (NEW.data_troca - anterior.data_troca)) / 86400.0);
-
-    SELECT id INTO ciclo_existente
-      FROM public.ciclos_toner
-     WHERE troca_fim_id=NEW.id
-     LIMIT 1;
-
-    IF ciclo_existente IS NOT NULL THEN
-      UPDATE public.ciclos_toner SET
-        impressora_id=NEW.impressora_id,
-        cor=NEW.cor,
-        solicitacao_recebida_id=NEW.solicitacao_id,
-        leitura_inicio_id=anterior.leitura_id,
-        leitura_fim_id=leitura_troca_id,
-        contador_inicio=anterior.contador_troca,
-        contador_fim=NEW.contador_troca,
-        copias_produzidas=copias,
-        data_inicio=anterior.data_troca,
-        data_fim=NEW.data_troca,
-        dias_duracao=dias,
-        troca_inicio_id=anterior.id,
-        tipo_ciclo='TROCA'
-      WHERE id=ciclo_existente;
-    ELSE
-      INSERT INTO public.ciclos_toner
-        (impressora_id, cor, solicitacao_recebida_id, leitura_inicio_id, leitura_fim_id,
-         contador_inicio, contador_fim, copias_produzidas, data_inicio, data_fim,
-         dias_duracao, troca_inicio_id, troca_fim_id, tipo_ciclo)
-      VALUES
-        (NEW.impressora_id, NEW.cor, NEW.solicitacao_id, anterior.leitura_id, leitura_troca_id,
-         anterior.contador_troca, NEW.contador_troca, copias, anterior.data_troca, NEW.data_troca,
-         dias, anterior.id, NEW.id, 'TROCA');
-    END IF;
-  END IF;
-
-  RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_sgt_troca_toner ON public.trocas_toner;
-CREATE TRIGGER trg_sgt_troca_toner
-AFTER INSERT OR UPDATE OF impressora_id, cor, data_troca, contador_troca, solicitacao_id, observacoes, deletado
-ON public.trocas_toner
-FOR EACH ROW EXECUTE FUNCTION public.sgt_registrar_troca_toner();
-
-ALTER TABLE public.trocas_toner ENABLE ROW LEVEL SECURITY;
-GRANT USAGE ON SCHEMA public TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.trocas_toner TO authenticated;
-DROP POLICY IF EXISTS "SGT authenticated access" ON public.trocas_toner;
-CREATE POLICY "SGT authenticated access" ON public.trocas_toner
-  FOR ALL TO authenticated USING (true) WITH CHECK (true);
-GRANT EXECUTE ON FUNCTION public.sgt_registrar_troca_toner() TO authenticated;
-
-ALTER TABLE public.trocas_toner REPLICA IDENTITY FULL;
-DO $$ BEGIN
-  ALTER PUBLICATION supabase_realtime ADD TABLE public.trocas_toner;
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-
-NOTIFY pgrst, 'reload schema';
-
-
--- ============================================================
--- DADOS INICIAIS — SALVADOR
--- ============================================================
-INSERT INTO public.impressoras
-  (setor, fabricante, modelo, nome_exibicao, cor_tipo, status, ip, mac, numero_serie, patrimonio, ativo)
-VALUES
-  ('CHECK-IN',    'CANON',   'CANON GX 7000', 'CANON GX 7000 (CHECK-IN)',    'COLORIDA',       'EM USO', '172.50.0.202',                  '40:F8:DF:BD:00:39', 'KNDX14444',          'SPSCOM', true),
-  ('SUPRIMENTOS', 'SAMSUNG', 'SL-M4070',      'SAMSUNG SL-M4070 (SUPRIMENTOS)', 'PRETO E BRANCO', 'EM USO', '172.50.0.3',                    '30:CD:A7:CB:D5:20', 'ZDDPBQAH8000PTL',   'SPSCOM', true),
-  ('PILOTOS',     'CANON',   'CANON GX 7000', 'CANON GX 7000 (PILOTOS)',     'COLORIDA',       'EM USO', '172.50.0.201',                  'DC:C2:C9:A1:05:0B', 'KNDW24063',          'SPSCOM', true),
-  ('MANUTENÇÃO',  'KYOCERA', 'M2040DN',       'KYOCERA M2040DN (MANUTENÇÃO)', 'PRETO E BRANCO', 'EM USO', '192.168.10.7 / 172.50.0.200',   '00:17:C8:95:07:BE', 'VR99762697',         'SPSCOM', true)
-ON CONFLICT DO NOTHING;
-
--- Garante uma configuração inicial coerente com a nova previsão por ciclos reais.
-INSERT INTO public.configuracoes
-  (id, intervalo_min, janela_seg, peso_neg, limite_risco, consumo_medio, regra_tentativa)
-VALUES
-  (1, 2, 10, 0, 3, 0, 30)
-ON CONFLICT (id) DO UPDATE SET
-  intervalo_min = EXCLUDED.intervalo_min,
-  janela_seg = EXCLUDED.janela_seg,
-  peso_neg = EXCLUDED.peso_neg,
-  limite_risco = EXCLUDED.limite_risco,
-  consumo_medio = EXCLUDED.consumo_medio,
-  regra_tentativa = EXCLUDED.regra_tentativa;
-
-NOTIFY pgrst, 'reload schema';
+<!doctype html>
+<html lang="pt-BR"><head>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.577.0/dist/umd/lucide.min.js"></script><meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SGT Enterprise — Gestão de Toners | Salvador</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+  <style>
+*{font-family:'DM Sans',sans-serif}
+.nav-item{transition:all .2s}.nav-item:hover,.nav-item.active{background:rgba(255,255,255,.15)}
+.sv{display:none;width:100%}.sv.active{display:block;width:100%}
+main{min-width:0;width:100%}
+.config-shell{width:100%;max-width:1500px;margin:0 auto}
+.tc{width:100%;border-collapse:collapse}.tc th{background:#1e3a5f;color:#fff;padding:10px 12px;text-align:left;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}.tc td{padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:12px}.tc tr:hover td{background:#f0f7ff}
+.inv-tbody tr.inv-critical{background:#fee2e2}.inv-tbody tr.inv-critical td{background:#fee2e2}
+.inv-tbody tr.inv-warning{background:#fef3c7}.inv-tbody tr.inv-warning td{background:#fef3c7}
+.inv-tbody tr.inv-ok{background:#fff}.inv-tbody tr.inv-ok td{background:#fff}
+.badge{padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600;display:inline-block}
+.kpi-card{transition:transform .2s}.kpi-card:hover{transform:translateY(-2px)}
+.sem-c{background:#fecaca;color:#991b1b;border-left:4px solid #dc2626}
+.sem-a{background:#fef3c7;color:#92400e;border-left:4px solid #f59e0b}
+.sem-o{background:#dcfce7;color:#166534;border-left:4px solid #16a34a}
+.sgt-auth-overlay{position:fixed;inset:0;background:#0f2744;display:flex;align-items:center;justify-content:center;z-index:9999}.sgt-auth-card{width:min(420px,calc(100% - 32px));background:#fff;border-radius:16px;padding:28px;box-shadow:0 20px 60px rgba(0,0,0,.3)}.sgt-auth-input{width:100%;border:1px solid #d1d5db;border-radius:8px;padding:11px 12px;font-size:14px;outline:none}.sgt-auth-input:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+</style>
+  <script src="https://cdn.tailwindcss.com/3.4.17" type="text/javascript"></script>
+  
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+/* SGT Enterprise v16 — previsão por ciclos reais + configuração revisada */
+const SUPABASE_URL = 'COLE_A_URL_DO_SUPABASE_SALVADOR_AQUI'.replace(' ', '');
+const SUPABASE_PUBLISHABLE_KEY = 'COLE_A_CHAVE_PUBLISHABLE_DO_SUPABASE_SALVADOR_AQUI';
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+});
+
+(function(){
+  let handler = null;
+  const tables = ['impressoras','solicitacoes','justificativas','movimentacoes_estoque','historico'];
+  let realtimeChannel = null;
+  let notifyTimer = null;
+  let pollTimer = null;
+  let crossTab = null;
+  async function loadStockBalances(){
+    const {data,error}=await supabaseClient.from('estoque_atual').select('id,impressora_id,cor,quantidade,atualizado_em');
+    if(error) throw error;
+    window.sgtStockBalances=data||[];
+  }
+  async function loadTonerHistory(){
+    const [{data:trocas,error:e1},{data:ciclos,error:e2}]=await Promise.all([
+      supabaseClient.from('trocas_toner').select('*').order('data_troca',{ascending:false}),
+      supabaseClient.from('ciclos_toner').select('*').order('data_fim',{ascending:false})
+    ]);
+    if(e1) throw e1;
+    if(e2) throw e2;
+    window.sgtTonerChanges=trocas||[];
+    window.sgtTonerCycles=ciclos||[];
+  }
+  async function notify(){
+    const data=await loadAll();
+    await loadStockBalances();
+    await loadTonerHistory();
+    if(handler&&handler.onDataChanged) handler.onDataChanged(data);
+  }
+  function scheduleNotify(){
+    clearTimeout(notifyTimer);
+    notifyTimer=setTimeout(()=>notify().catch(e=>console.error('SGT realtime',e)),180);
+  }
+  function broadcastChange(){
+    try{
+      if(crossTab) crossTab.postMessage({type:'sgt-data-changed',at:Date.now()});
+      localStorage.setItem('sgt_sync_ping',String(Date.now()));
+    }catch(e){}
+  }
+  function startRealtime(){
+    if(realtimeChannel) supabaseClient.removeChannel(realtimeChannel);
+    try{
+      if(crossTab) crossTab.close();
+      crossTab=new BroadcastChannel('sgt-enterprise-sync');
+      crossTab.onmessage=ev=>{if(ev?.data?.type==='sgt-data-changed') scheduleNotify();};
+    }catch(e){crossTab=null;}
+    window.addEventListener('storage',ev=>{if(ev.key==='sgt_sync_ping') scheduleNotify();});
+    document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') scheduleNotify(); });
+    window.addEventListener('focus',()=>scheduleNotify());
+    realtimeChannel=supabaseClient.channel('sgt-realtime')
+      .on('postgres_changes',{event:'*',schema:'public',table:'impressoras'},scheduleNotify)
+      .on('postgres_changes',{event:'*',schema:'public',table:'solicitacoes'},scheduleNotify)
+      .on('postgres_changes',{event:'*',schema:'public',table:'justificativas'},scheduleNotify)
+      .on('postgres_changes',{event:'*',schema:'public',table:'movimentacoes_estoque'},scheduleNotify)
+      .on('postgres_changes',{event:'*',schema:'public',table:'historico'},scheduleNotify)
+      .on('postgres_changes',{event:'*',schema:'public',table:'estoque_atual'},scheduleNotify)
+      .on('postgres_changes',{event:'*',schema:'public',table:'trocas_toner'},scheduleNotify)
+      .on('postgres_changes',{event:'*',schema:'public',table:'ciclos_toner'},scheduleNotify)
+      .subscribe();
+    clearInterval(pollTimer);
+    pollTimer=setInterval(()=>{ scheduleNotify(); },2000);
+  }
+  const printerCache = new Map();
+
+  const today = () => new Date().toISOString().split('T')[0];
+  const clean = v => v === undefined ? null : v;
+  const getPrinterId = async (name) => {
+    if (!name) return null;
+    if (printerCache.has(name)) return printerCache.get(name);
+    const { data, error } = await supabaseClient.from('impressoras').select('id,nome_exibicao').eq('nome_exibicao', name).limit(1);
+    if (error) throw error;
+    const id = data && data[0] ? data[0].id : null;
+    if (id) printerCache.set(name,id);
+    return id;
+  };
+  const printerName = async (id) => {
+    if (!id) return '';
+    for (const [name,cached] of printerCache.entries()) if (cached===id) return name;
+    const { data, error } = await supabaseClient.from('impressoras').select('id,nome_exibicao').eq('id',id).limit(1);
+    if (error) throw error;
+    const name = data && data[0] ? data[0].nome_exibicao : '';
+    if (name) printerCache.set(name,id);
+    return name;
+  };
+
+  async function seedPrinters(){ return; }
+
+  async function toRow(record){
+    const t=record.tipo_registro;
+    const printerId=record.impressora ? await getPrinterId(record.impressora) : null;
+    if (['solicitacao','justificativa','estoque'].includes(t) && !printerId) throw new Error('Impressora não encontrada no banco: '+(record.impressora||''));
+    if(t==='impressora') return {
+      id:record.__backendId, setor:clean(record.setor||''), fabricante:clean(record.fabricante||''), modelo:clean(record.modelo||''),
+      nome_exibicao:clean(record.impressora||record.nome_exibicao||''), status:clean(record.status||'ATIVA'),
+      ip:clean(record.ip||null), numero_serie:clean(record.numero_serie||null), ativo:record.deletado!==true
+    };
+    if(t==='solicitacao') return {
+      id:record.__backendId, impressora_id:printerId, toner_modelo:record.toner_modelo||record.nome_suprimento||'', nome_suprimento:record.nome_suprimento||record.toner_modelo||'', cor:clean(record.cor||null),
+      status:record.status||'PENDENTE', responsavel:clean(record.responsavel||null), observacoes:clean(record.observacoes||null), contador_atual:record.contador_atual===null||record.contador_atual===undefined||record.contador_atual===''?null:Math.max(0,Number(record.contador_atual)||0), contador_solicitacao:record.contador_solicitacao===null||record.contador_solicitacao===undefined||record.contador_solicitacao===''?null:Math.max(0,Number(record.contador_solicitacao)||0), contador_recebimento:record.contador_recebimento===null||record.contador_recebimento===undefined||record.contador_recebimento===''?null:Math.max(0,Number(record.contador_recebimento)||0), data_solicitacao:record.data_solicitacao||today(),
+      data_analise:clean(record.data_analise||null), motivo_negativa:clean(record.motivo_negativa||null), deletado:!!record.deletado,
+      data_delecao:clean(record.data_delecao||null), data_edicao:clean(record.data_edicao||null)
+    };
+    if(t==='justificativa') return {
+      id:record.__backendId, impressora_id:printerId, nome_suprimento:clean(record.nome_suprimento||record.toner_modelo||null), toner_modelo:clean(record.toner_modelo||record.nome_suprimento||null),
+      cor_negada:clean(record.cor_negada||null), vida_util_copias:Number(record.vida_util_copias)||0, contador_atual:Number(record.contador_atual)||0,
+      ultima_troca_req:Number(record.ultima_troca_req)||0, data_ultima_troca:clean(record.data_ultima_troca||null), saldo_produzido:Number(record.saldo_produzido)||0,
+      pct_produzido:Number(record.pct_produzido)||0, pct_permitido:Number(record.pct_permitido)||0, pct_faltante:Number(record.pct_faltante)||0, copias_faltantes:Number(record.copias_faltantes)||0,
+      previsao_nova_tentativa:clean(record.previsao_nova_tentativa||null), status:clean(record.status||null), tipo_analise:clean(record.tipo_analise||null),
+      motivo_negativa:clean(record.motivo_negativa||null), responsavel:clean(record.responsavel||null), data_solicitacao:clean(record.data_solicitacao||null),
+      data_analise:clean(record.data_analise||null), observacoes:clean(record.observacoes||null), deletado:!!record.deletado, data_delecao:clean(record.data_delecao||null), data_edicao:clean(record.data_edicao||null)
+    };
+    if(t==='estoque') return {
+      id:record.__backendId, impressora_id:printerId, toner_modelo:record.toner_modelo||record.nome_suprimento||'', nome_suprimento:clean(record.nome_suprimento||record.toner_modelo||null),
+      cor:clean(record.cor||record.cor_negada||null), entrada:Math.max(0,Number(record.estoque_entrada)||0), saida:Math.max(0,Number(record.estoque_saida)||0),
+      data_movimentacao:record.data_leitura||new Date().toISOString(), ref_solicitacao_id:clean(record.ref_solicitacao||null), observacoes:clean(record.observacoes||null),
+      deletado:!!record.deletado, data_delecao:clean(record.data_delecao||null), data_edicao:clean(record.data_edicao||null)
+    };
+    if(t==='historico') return {
+      id:record.__backendId, impressora_id:clean(printerId), solicitacao_id:clean(record.ref_solicitacao||null), justificativa_id:null,
+      nome_suprimento:clean(record.nome_suprimento||null), status_anterior:clean(record.status_anterior||null), novo_status:clean(record.novo_status||null),
+      motivo_negativa:clean(record.motivo_negativa||null), responsavel:clean(record.responsavel||null), observacoes:clean(record.observacoes||null),
+      tipo_evento:clean(record.tipo_evento||record.novo_status||null), data_evento:record.data_evento||new Date().toISOString(), deletado:!!record.deletado,
+      data_delecao:clean(record.data_delecao||null), data_edicao:clean(record.data_edicao||null)
+    };
+    throw new Error('Tipo de registro não suportado: '+t);
+  }
+
+  async function fromRow(t,row){
+    if(t==='impressoras') return {__backendId:row.id,tipo_registro:'impressora',impressora:row.nome_exibicao,setor:row.setor,fabricante:row.fabricante,modelo:row.modelo,status:row.status,ip:row.ip,numero_serie:row.numero_serie,deletado:row.ativo===false,data_edicao:row.atualizado_em};
+    const name=await printerName(row.impressora_id);
+    if(t==='solicitacoes') return {__backendId:row.id,tipo_registro:'solicitacao',impressora:name,nome_suprimento:row.nome_suprimento||row.toner_modelo,toner_modelo:row.toner_modelo,cor:row.cor||null,status:row.status,responsavel:row.responsavel,observacoes:row.observacoes,contador_atual:row.contador_atual,contador_solicitacao:row.contador_solicitacao,contador_recebimento:row.contador_recebimento,data_solicitacao:row.data_solicitacao,data_analise:row.data_analise,motivo_negativa:row.motivo_negativa,deletado:row.deletado,data_delecao:row.data_delecao,data_edicao:row.data_edicao};
+    if(t==='justificativas') return {__backendId:row.id,tipo_registro:'justificativa',impressora:name,nome_suprimento:row.nome_suprimento,toner_modelo:row.toner_modelo,cor_negada:row.cor_negada,vida_util_copias:row.vida_util_copias,contador_atual:row.contador_atual,ultima_troca_req:row.ultima_troca_req,data_ultima_troca:row.data_ultima_troca,saldo_produzido:row.saldo_produzido,pct_produzido:row.pct_produzido,pct_permitido:row.pct_permitido,pct_faltante:row.pct_faltante,copias_faltantes:row.copias_faltantes,previsao_nova_tentativa:row.previsao_nova_tentativa,status:row.status,tipo_analise:row.tipo_analise,motivo_negativa:row.motivo_negativa,responsavel:row.responsavel,data_solicitacao:row.data_solicitacao,data_analise:row.data_analise,observacoes:row.observacoes,deletado:row.deletado,data_delecao:row.data_delecao,data_edicao:row.data_edicao};
+    if(t==='movimentacoes_estoque') return {__backendId:row.id,tipo_registro:'estoque',impressora:name,toner_modelo:row.toner_modelo,nome_suprimento:row.nome_suprimento,cor:row.cor,estoque_entrada:row.entrada,estoque_saida:row.saida,data_leitura:row.data_movimentacao,ref_solicitacao:row.ref_solicitacao_id,observacoes:row.observacoes,deletado:row.deletado,data_delecao:row.data_delecao,data_edicao:row.data_edicao};
+    if(t==='historico') return {__backendId:row.id,tipo_registro:'historico',impressora:name,nome_suprimento:row.nome_suprimento,status_anterior:row.status_anterior,novo_status:row.novo_status,motivo_negativa:row.motivo_negativa,responsavel:row.responsavel,observacoes:row.observacoes,tipo_evento:row.tipo_evento,data_evento:row.data_evento,ref_solicitacao:row.solicitacao_id,deletado:row.deletado,data_delecao:row.data_delecao,data_edicao:row.data_edicao};
+  }
+
+  async function loadAll(){
+    const all=[];
+    for(const t of tables){
+      const {data,error}=await supabaseClient.from(t).select('*');
+      if(error){
+        console.error('SGT Supabase load',t,error);
+        throw new Error(`Falha ao carregar ${t}: ${error.message||error.code||'erro desconhecido'}`);
+      }
+      for(const row of (data||[])) all.push(await fromRow(t,row));
+    }
+    return all;
+  }
+
+  window.dataSdk={
+    async init(h){
+      handler=h||null;
+      const {data:{session},error}=await supabaseClient.auth.getSession();
+      if(error) return {isOk:false,error};
+      if(!session) return {isOk:false,error:new Error('Usuário não autenticado')};
+      const {data:cfgRow,error:cfgErr}=await supabaseClient.from('configuracoes').select('*').eq('id',1).maybeSingle();
+      if(cfgErr) throw cfgErr;
+      if(cfgRow){const legacyDefault=Number(cfgRow.intervalo_min)===15&&Number(cfgRow.janela_seg)===7&&Number(cfgRow.peso_neg)===5&&Number(cfgRow.consumo_medio)===60&&Number(cfgRow.regra_tentativa)===30;if(legacyDefault)localStorage.setItem('sgt_cfg5',JSON.stringify({min_ciclos:2,antecedencia_alerta:10,limite_risco:Math.max(1,Number(cfgRow.limite_risco)||3),regra_tentativa:Math.max(0,Number(cfgRow.regra_tentativa)||30)}));else localStorage.setItem('sgt_cfg5',JSON.stringify({min_ciclos:Math.max(1,Number(cfgRow.intervalo_min)||2),antecedencia_alerta:Math.max(0,Number(cfgRow.janela_seg)||10),limite_risco:Math.max(1,Number(cfgRow.limite_risco)||3),regra_tentativa:Math.max(0,Number(cfgRow.regra_tentativa)||30)}));}
+      startRealtime();
+      await notify();
+      return {isOk:true};
+    },
+    async create(record){
+      try{
+        const row=await toRow(record);
+        const table=({impressora:'impressoras',solicitacao:'solicitacoes',justificativa:'justificativas',estoque:'movimentacoes_estoque',historico:'historico'})[record.tipo_registro];
+        const {data,error}=await supabaseClient.from(table).insert(row).select('*').single();
+        if(error) throw error;
+        const item=await fromRow(table,data);
+        await notify();
+        broadcastChange();
+        return {isOk:true,record:item};
+      }catch(error){console.error('SGT Supabase create',error);return {isOk:false,error};}
+    },
+    async update(record){
+      try{
+        const table=({impressora:'impressoras',solicitacao:'solicitacoes',justificativa:'justificativas',estoque:'movimentacoes_estoque',historico:'historico'})[record.tipo_registro];
+        const row=await toRow(record); delete row.id;
+        const {data,error}=await supabaseClient.from(table).update(row).eq('id',record.__backendId).select('*').single();
+        if(error) throw error;
+        const item=await fromRow(table,data);
+        await notify();
+        broadcastChange();
+        return {isOk:true,record:item};
+      }catch(error){console.error('SGT Supabase update',error);return {isOk:false,error};}
+    }
+  };
+
+  window.sgtAuth={sb:supabaseClient, async signOut(){return supabaseClient.auth.signOut()}, async saveConfig(c){const {data,error}=await supabaseClient.from('configuracoes').update({intervalo_min:c.min_ciclos,janela_seg:c.antecedencia_alerta,limite_risco:c.limite_risco,regra_tentativa:c.regra_tentativa}).eq('id',1).select('*').single();return {data,error}}, async registrarTroca(t){const {data:imp,error:e1}=await supabaseClient.from('impressoras').select('id').eq('nome_exibicao',t.impressora).limit(1).single();if(e1)throw e1;const payload={impressora_id:imp.id,cor:t.cor,data_troca:t.data_troca,contador_troca:t.contador_troca===null?null:t.contador_troca,solicitacao_id:t.solicitacao_id||null,observacoes:t.observacoes||null};const {data,error}=await supabaseClient.from('trocas_toner').insert(payload).select('*').single();if(error)throw error;await notify();broadcastChange();return data}};
+})();
+</script>
+
+</head>
+ <body class="min-h-screen flex" style="background: rgb(244, 247, 251);">
+  <aside class="w-60 min-h-screen flex-shrink-0 flex flex-col" style="background:#0f2744">
+   <div class="p-4 border-b border-white/10">
+    <h1 class="text-white font-bold text-lg" style="color: rgb(255, 255, 255); font-weight: 700; font-style: normal; font-size: 18px;">SGT Enterprise</h1>
+    <p class="text-blue-200 text-xs mt-1" style="color: rgb(147, 197, 253); font-weight: 400; font-style: normal; font-size: 11px;">Sistema de Gestão de Toners — Histórico e Previsão Inteligente</p>
+   </div>
+   <nav class="flex-1 p-3 space-y-1" id="main-nav">
+    <button class="nav-item active w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white text-sm" data-view="dashboard" onclick="sw('dashboard')"><i data-lucide="layout-dashboard" style="width:18px;height:18px"></i> Dashboard</button> <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 text-sm" data-view="cadastro" onclick="sw('cadastro')"><i data-lucide="database" style="width:18px;height:18px"></i> Cadastro</button> <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 text-sm" data-view="solicitacoes" onclick="sw('solicitacoes')"><i data-lucide="file-text" style="width:18px;height:18px"></i> Solicitações</button> <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 text-sm" data-view="justificativa" onclick="sw('justificativa')"><i data-lucide="file-check" style="width:18px;height:18px"></i> Análise de solicitações</button> <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 text-sm" data-view="historico" onclick="sw('historico')"><i data-lucide="history" style="width:18px;height:18px"></i> Histórico</button> <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 text-sm" data-view="momento-ideal" onclick="sw('momento-ideal')"><i data-lucide="trending-up" style="width:18px;height:18px"></i> Momento Ideal</button> <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 text-sm" data-view="estoque" onclick="sw('estoque')"><i data-lucide="package" style="width:18px;height:18px"></i> Estoque</button> <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 text-sm" data-view="configuracoes" onclick="sw('configuracoes')"><i data-lucide="settings" style="width:18px;height:18px"></i> Configurações</button> <button class="nav-item w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-white/70 text-sm" data-view="exportacao" onclick="sw('exportacao')"><i data-lucide="download" style="width:18px;height:18px"></i> Exportação</button>
+   </nav>
+  </aside>
+  <div class="flex-1 flex flex-col min-h-screen overflow-auto" style="background:#f4f7fb">
+   <header class="flex items-center justify-between px-6 py-4 shadow-sm" style="background: rgb(30, 58, 95);">
+    <h2 id="vt" class="text-white font-semibold text-lg">Dashboard</h2>
+    <div class="flex items-center gap-3"><span class="text-blue-200 text-sm" id="dt"></span><span id="sgt-user-email" class="text-blue-100 text-xs hidden"></span><button id="sgt-logout" onclick="window.sgtLogout()" class="hidden bg-white/15 hover:bg-white/25 text-white text-xs px-3 py-1 rounded-full">Sair</button><span class="bg-white/20 text-white text-xs px-3 py-1 rounded-full">v6.0</span>
+    </div>
+   </header>
+   <main class="flex-1 p-6">
+    <!-- Modals -->
+    <div id="del-m" class="fixed inset-0 bg-black/40 flex items-center justify-center z-[100] hidden">
+     <div class="bg-white rounded-xl shadow-2xl p-6 w-96">
+      <div class="flex items-center gap-3 mb-4"><i data-lucide="alert-circle" style="width:24px;height:24px;color:#dc2626"></i>
+       <h3 class="font-semibold text-gray-800">Confirmar Exclusão</h3>
+      </div>
+      <p class="text-sm text-gray-600 mb-4">Tem certeza? Ação irreversível.</p>
+      <p id="del-info" class="text-xs text-gray-500 mb-4 p-2 bg-gray-50 rounded"></p>
+      <div class="flex gap-3 justify-end"><button onclick="cdm()" class="px-4 py-2 text-sm bg-gray-200 text-gray-700 rounded-lg">Cancelar</button><button id="del-btn" onclick="cfd()" class="px-4 py-2 text-sm bg-red-600 text-white rounded-lg">Excluir</button>
+      </div>
+     </div>
+    </div>
+    <div id="ed-m" class="fixed inset-0 bg-black/40 flex items-center justify-center z-[100] hidden overflow-y-auto">
+     <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-2xl my-8">
+      <div class="flex items-center justify-between mb-4">
+       <h3 class="font-semibold text-gray-800 text-lg" id="ed-t">Editar</h3><button onclick="cem()" class="text-gray-400 hover:text-gray-600"><i data-lucide="x" style="width:24px;height:24px"></i></button>
+      </div>
+      <form id="ed-f" onsubmit="ser(event)" class="space-y-4">
+       <div id="ed-flds" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+       <div class="flex gap-3 justify-end pt-4 border-t"><button type="button" onclick="cem()" class="px-4 py-2 text-sm bg-gray-200 text-gray-700 rounded-lg">Cancelar</button><button type="submit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg">Salvar</button>
+       </div>
+      </form>
+     </div>
+    </div><!-- DASHBOARD -->
+    <div class="sv active" id="v-dashboard">
+     <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+      <p class="text-sm text-blue-800" style="color: rgb(30, 64, 175); font-weight: 400; font-style: normal; font-size: 14px;">Visão executiva: KPIs consolidados. Cada ação gera evento no histórico. Registros podem ser alterados, excluídos e auditados.</p>
+     </div>
+     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div class="kpi-card bg-white rounded-xl p-4 shadow-sm border-l-4 border-red-500">
+       <p class="text-xs text-gray-500 uppercase font-medium">Críticos</p>
+       <p class="text-2xl font-bold text-red-700 mt-1" id="k-c">0</p>
+      </div>
+      <div class="kpi-card bg-white rounded-xl p-4 shadow-sm border-l-4 border-amber-500">
+       <p class="text-xs text-gray-500 uppercase font-medium">Atenção</p>
+       <p class="text-2xl font-bold text-amber-700 mt-1" id="k-a">0</p>
+      </div>
+      <div class="kpi-card bg-white rounded-xl p-4 shadow-sm border-l-4 border-green-500">
+       <p class="text-xs text-gray-500 uppercase font-medium">OK</p>
+       <p class="text-2xl font-bold text-green-700 mt-1" id="k-o">0</p>
+      </div>
+      <div class="kpi-card bg-white rounded-xl p-4 shadow-sm border-l-4 border-blue-500">
+       <p class="text-xs text-gray-500 uppercase font-medium">Solicitações</p>
+       <p class="text-2xl font-bold text-blue-700 mt-1" id="k-s">0</p>
+      </div>
+     </div>
+     <div class="bg-white rounded-xl shadow-sm p-5 mb-6">
+      <div class="flex items-center justify-between mb-4">
+       <h3 class="font-semibold text-gray-800" style="color: rgb(31, 41, 55); font-weight: 600; font-style: normal; font-size: 16px;">Estoque Atual de Toners</h3><button onclick="pe()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg flex items-center gap-2"><i data-lucide="printer" style="width:16px;height:16px"></i> Imprimir</button>
+      </div>
+      <div class="overflow-auto">
+       <table class="tc">
+        <thead>
+         <tr>
+          <th>Impressora</th>
+          <th class="text-center">Ciano</th>
+          <th class="text-center">Magenta</th>
+          <th class="text-center">Amarelo</th>
+          <th class="text-center">Preto</th>
+          <th>Nº Série</th>
+          <th>Situação</th>
+         </tr>
+        </thead>
+        <tbody id="inv-b" class="inv-tbody"></tbody>
+       </table>
+      </div>
+     </div>
+    </div><!-- CADASTRO -->
+    <div class="sv" id="v-cadastro">
+     <div class="bg-white rounded-xl shadow-sm p-5 mb-5">
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+       <div>
+        <h3 class="font-semibold text-gray-800">Impressoras Cadastradas</h3>
+       </div><button onclick="document.getElementById('pf').classList.remove('hidden')" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg flex items-center gap-2"><i data-lucide="plus" style="width:16px;height:16px"></i> Nova</button>
+      </div>
+      <div class="overflow-auto">
+       <table class="tc">
+        <thead>
+         <tr>
+          <th>Setor</th>
+          <th>Fabricante</th>
+          <th>Modelo</th>
+          <th>IP</th>
+          <th>Status</th>
+          <th>Nº Série</th>
+          <th>Ações</th>
+         </tr>
+        </thead>
+        <tbody id="cad-b"></tbody>
+       </table>
+      </div>
+     </div>
+     <div id="pf" class="hidden bg-white rounded-xl shadow-sm p-5">
+      <h3 class="font-semibold text-gray-800 mb-4">Nova Impressora</h3>
+      <form onsubmit="sp(event)" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="f-s">Setor</label><input id="f-s" class="w-full border rounded-lg px-3 py-2 text-sm" required="">
+       </div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="f-f">Fabricante</label><input id="f-f" class="w-full border rounded-lg px-3 py-2 text-sm" required="">
+       </div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="f-m">Modelo</label><input id="f-m" class="w-full border rounded-lg px-3 py-2 text-sm" required="">
+       </div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="f-ip">IP</label><input id="f-ip" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Ex.: 192.168.1.100">
+       </div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="f-st">Status</label><select id="f-st" class="w-full border rounded-lg px-3 py-2 text-sm"><option>ATIVA</option><option>INATIVA</option><option>MANUTENÇÃO</option></select>
+       </div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="f-sr">Nº Série</label><input id="f-sr" class="w-full border rounded-lg px-3 py-2 text-sm">
+       </div>
+       <div class="md:col-span-3 flex gap-3 mt-2"><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-6 py-2 rounded-lg">Salvar</button><button type="button" onclick="document.getElementById('pf').classList.add('hidden')" class="bg-gray-200 text-gray-700 text-sm px-6 py-2 rounded-lg">Cancelar</button>
+       </div>
+      </form>
+     </div>
+    </div><!-- SOLICITAÇÕES -->
+    <div class="sv" id="v-solicitacoes">
+     <div class="bg-white rounded-xl shadow-sm p-5 mb-5">
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+       <h3 class="font-semibold text-gray-800">Solicitações de Toner</h3>
+       <div class="flex gap-2"><select id="fil-st" onchange="rSol()" class="border rounded-lg px-3 py-2 text-sm"><option value="">Todos</option><option value="PENDENTE">Pendente</option><option value="APROVADO">Aprovado</option><option value="ESPERANDO RECEBIMENTO">Esp. Recebimento</option><option value="RECEBIDO">Recebido</option><option value="NEGADO">Negado</option></select><button onclick="document.getElementById('sf').classList.remove('hidden');pps('s-i')" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg flex items-center gap-2"><i data-lucide="plus" style="width:16px;height:16px"></i> Nova</button>
+       </div>
+      </div>
+      <div id="sf" class="hidden bg-gray-50 border border-gray-200 rounded-lg p-5 mb-5">
+       <form onsubmit="ss(event)" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div><label class="text-xs font-medium text-gray-600 block mb-1" for="s-i">Impressora</label><select id="s-i" class="w-full border rounded-lg px-3 py-2 text-sm" required=""></select>
+        </div>
+        <div><label class="text-xs font-medium text-gray-600 block mb-1" for="s-s">Toner</label><select id="s-s" class="w-full border rounded-lg px-3 py-2 text-sm" required><option value="">Selecione...</option><option value="CIANO">Ciano</option><option value="MAGENTA">Magenta</option><option value="AMARELO">Amarelo</option><option value="PRETO">Preto</option></select>
+        </div>
+        <div><label class="text-xs font-medium text-gray-600 block mb-1" for="s-ca">Contador atual</label><input id="s-ca" type="number" min="0" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Opcional, mas recomendado">
+        </div>
+        <div><label class="text-xs font-medium text-gray-600 block mb-1" for="s-r">Responsável</label><input id="s-r" class="w-full border rounded-lg px-3 py-2 text-sm" required="">
+        </div>
+        <div><label class="text-xs font-medium text-gray-600 block mb-1" for="s-o">Obs</label><input id="s-o" class="w-full border rounded-lg px-3 py-2 text-sm">
+        </div>
+        <div class="md:col-span-3 flex gap-3 mt-2"><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-6 py-2 rounded-lg">Salvar</button><button type="button" onclick="document.getElementById('sf').classList.add('hidden')" class="bg-gray-200 text-gray-700 text-sm px-6 py-2 rounded-lg">Cancelar</button>
+        </div>
+       </form>
+      </div>
+      <div class="overflow-auto">
+       <table class="tc">
+        <thead>
+         <tr>
+          <th>Impressora</th>
+          <th>Suprimento</th>
+          <th>Data</th>
+          <th>Status</th>
+          <th>Responsável</th>
+          <th>Obs</th>
+          <th>Ações</th>
+         </tr>
+        </thead>
+        <tbody id="sol-b"></tbody>
+       </table>
+      </div>
+     </div>
+    </div><!-- NEGATIVAS -->
+    <div class="sv" id="v-justificativa">
+     <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+      <p class="text-sm text-blue-800" style="color: rgb(30, 64, 175); font-weight: 400; font-style: normal; font-size: 14px;">Registre solicitações positivas ou negativas. O contador informado fica guardado como leitura histórica; negativas não reiniciam o ciclo e completam o histórico até o recebimento efetivo.</p>
+     </div>
+     <div class="bg-white rounded-xl shadow-sm p-5 mb-5">
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+       <h3 class="font-semibold text-gray-800">Análise de solicitações</h3><select id="jp" onchange="rJ()" class="border rounded-lg px-3 py-2 text-sm"><option value="">Selecione impressora...</option></select>
+      </div>
+      <div id="jfc" class="hidden bg-gray-50 border border-gray-200 rounded-lg p-5 mb-5">
+       <form onsubmit="sj(event)" class="space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-tipo">Tipo de solicitação</label><select id="j-tipo" class="w-full border rounded-lg px-3 py-2 text-sm" onchange="uj_cr()"><option value="NEGATIVO">Negativa</option><option value="POSITIVO">Positiva</option></select>
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-ns">Toner</label><select id="j-ns" class="w-full border rounded-lg px-3 py-2 text-sm" required onchange="uj_cr()"><option value="">Selecione...</option><option value="CIANO">Ciano</option><option value="MAGENTA">Magenta</option><option value="AMARELO">Amarelo</option><option value="PRETO">Preto</option></select>
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-vu">Vida Útil</label><input id="j-vu" type="number" class="w-full border rounded-lg px-3 py-2 text-sm">
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-ca">Contador Atual</label><input id="j-ca" type="number" class="w-full border rounded-lg px-3 py-2 text-sm">
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-ut">Cont. Última Troca</label><input id="j-ut" type="number" class="w-full border rounded-lg px-3 py-2 text-sm">
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-dt">Data Última Troca</label><input id="j-dt" type="date" class="w-full border rounded-lg px-3 py-2 text-sm">
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-sp">Saldo Produzido</label><input id="j-sp" type="text" inputmode="decimal" class="w-full border rounded-lg px-3 py-2 text-sm">
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-pp">% Produzido</label><input id="j-pp" type="text" inputmode="decimal" class="w-full border rounded-lg px-3 py-2 text-sm">
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-pm">% Permitido</label><input id="j-pm" type="number" step="0.01" class="w-full border rounded-lg px-3 py-2 text-sm">
+         </div>
+        </div>
+        <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-mo">Motivo</label><textarea id="j-mo" class="w-full border rounded-lg px-3 py-2 text-sm" rows="3" required=""></textarea>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-st">Status</label><select id="j-st" class="w-full border rounded-lg px-3 py-2 text-sm"><option>NEGADO</option><option>POSITIVO</option><option>ANÁLISE EM CURSO</option></select>
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-re">Responsável</label><input id="j-re" class="w-full border rounded-lg px-3 py-2 text-sm" required="">
+         </div>
+         <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-ds">Data Solicitação</label><input id="j-ds" type="date" class="w-full border rounded-lg px-3 py-2 text-sm" required="">
+         </div>
+        </div>
+        <div><label class="text-xs font-medium text-gray-600 block mb-1" for="j-ob">Observações</label><textarea id="j-ob" class="w-full border rounded-lg px-3 py-2 text-sm" rows="2"></textarea>
+        </div>
+        <div class="flex gap-3"><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-6 py-2 rounded-lg">Registrar</button><button type="button" onclick="document.getElementById('jfc').classList.add('hidden')" class="bg-gray-200 text-gray-700 text-sm px-6 py-2 rounded-lg">Cancelar</button>
+        </div>
+       </form>
+      </div><button id="jfb" onclick="document.getElementById('jfc').classList.remove('hidden')" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg hidden"><i data-lucide="plus" style="width:16px;height:16px"></i> Nova Análise</button>
+     </div>
+     <div id="jl" class="bg-white rounded-xl shadow-sm p-5 mb-5"></div>
+     <div class="bg-white rounded-xl shadow-sm p-5">
+      <h3 class="font-semibold text-gray-800 mb-4">Histórico de Análises</h3>
+      <div class="overflow-auto">
+       <table class="tc">
+        <thead>
+         <tr>
+          <th>Data</th>
+          <th>Suprimento</th>
+          <th>Cor</th>
+          <th>% Prod.</th>
+          <th>Motivo</th>
+          <th>Status</th>
+          <th>Resp.</th>
+          <th>Ação</th>
+         </tr>
+        </thead>
+        <tbody id="jb"></tbody>
+       </table>
+      </div>
+     </div>
+    </div><!-- HISTÓRICO -->
+    <div class="sv" id="v-historico">
+     <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+      <p class="text-sm text-blue-800" style="color: rgb(30, 64, 175); font-weight: 400; font-style: normal; font-size: 14px;">Trilha de auditoria completa. Registra todo ciclo do toner. Use filtros para auditar impressora específica.</p>
+     </div>
+     <div class="bg-white rounded-xl shadow-sm p-5">
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+       <div>
+        <h3 class="font-semibold text-gray-800">Trilha de Auditoria</h3>
+       </div>
+       <div class="flex gap-2">
+        <button id="hs-btn" onclick="tgHS()" class="bg-gray-600 hover:bg-gray-700 text-white text-sm px-3 py-2 rounded-lg hidden"><i data-lucide="check-square" style="width:16px;height:16px"></i></button> <button id="hdel-btn" onclick="delHM()" class="bg-red-600 hover:bg-red-700 text-white text-sm px-3 py-2 rounded-lg hidden"><i data-lucide="trash-2" style="width:16px;height:16px"></i> Deletar</button>
+       </div>
+      </div>
+      <div class="flex flex-wrap gap-3 mb-4"><select id="hf" onchange="rH()" class="border rounded-lg px-3 py-2 text-sm"><option value="">Todas impressoras</option></select><select id="hsf" onchange="rH()" class="border rounded-lg px-3 py-2 text-sm"><option value="">Todos status</option><option value="PENDENTE">Pendente</option><option value="APROVADO">Aprovado</option><option value="ESPERANDO RECEBIMENTO">Esp. Recebimento</option><option value="RECEBIDO">Recebido</option><option value="NEGADO">Negado</option><option value="ENTRADA ESTOQUE">Entrada Estoque</option></select>
+      </div>
+      <div class="overflow-auto">
+       <table class="tc">
+        <thead>
+         <tr>
+          <th style="width:40px"><input type="checkbox" id="hs-all" onchange="tgHSA(this)"></th>
+          <th>Data/Hora</th>
+          <th>Impressora</th>
+          <th>Suprimento</th>
+          <th>Ant.</th>
+          <th>Novo</th>
+          <th>Motivo</th>
+          <th>Resp.</th>
+          <th>Ação</th>
+         </tr>
+        </thead>
+        <tbody id="hb"></tbody>
+       </table>
+      </div>
+     </div>
+    </div><!-- MOMENTO IDEAL -->
+    <div class="sv" id="v-momento-ideal">
+     <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6">
+      <p class="text-sm text-blue-800" style="color: rgb(30, 64, 175); font-weight: 400; font-style: normal; font-size: 14px;">Análise por impressora. Negativas salvas recalculam previsão instantaneamente.</p>
+     </div>
+     <div class="bg-white rounded-xl shadow-sm p-5 mb-6">
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+       <h3 class="font-semibold text-gray-800">Previsão por Impressora</h3><select id="mp" onchange="rMI()" class="border rounded-lg px-3 py-2 text-sm"><option value="">Selecione...</option></select>
+      </div>
+      <div id="md" class="space-y-4"></div>
+     </div>
+     <div class="bg-white rounded-xl shadow-sm p-5">
+      <h3 class="font-semibold text-gray-800 mb-4">Últimas 10 Interações</h3>
+      <div class="overflow-auto">
+       <table class="tc">
+        <thead>
+         <tr>
+          <th>Data</th>
+          <th>Suprimento</th>
+          <th>Cor</th>
+          <th>Motivo</th>
+          <th>Resp.</th>
+         </tr>
+        </thead>
+        <tbody id="mh"></tbody>
+       </table>
+      </div>
+     </div>
+    </div><!-- ESTOQUE -->
+    <div class="sv" id="v-estoque">
+     <div class="bg-white rounded-xl shadow-sm p-5 mb-5">
+      <h3 class="font-semibold text-gray-800 mb-4">Movimentação de Estoque</h3>
+      <form onsubmit="se(event)" class="grid grid-cols-1 md:grid-cols-5 gap-4">
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="e-i">Impressora</label><select id="e-i" class="w-full border rounded-lg px-3 py-2 text-sm" required=""></select>
+       </div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="e-t">Toner</label><select id="e-t" class="w-full border rounded-lg px-3 py-2 text-sm" required><option value="">Selecione...</option><option value="CIANO">Ciano</option><option value="MAGENTA">Magenta</option><option value="AMARELO">Amarelo</option><option value="PRETO">Preto</option></select>
+       </div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="e-tp">Tipo</label><select id="e-tp" class="w-full border rounded-lg px-3 py-2 text-sm"><option value="entrada">Entrada</option><option value="saida">Saída</option></select>
+       </div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="e-q">Qtd</label><input id="e-q" type="number" min="1" class="w-full border rounded-lg px-3 py-2 text-sm" required="">
+       </div>
+       <div class="flex items-end"><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-6 py-2 rounded-lg w-full">Registrar</button>
+       </div>
+      </form>
+     </div>
+     <div class="bg-white rounded-xl shadow-sm p-5 mb-5">
+      <div class="mb-4"><h3 class="font-semibold text-gray-800">Registro de troca de toner</h3><p class="text-xs text-gray-500 mt-1">Registre quando o toner foi efetivamente instalado. O sistema usa essas datas para aprender o ritmo de cada impressora e prever a próxima troca.</p></div>
+      <form onsubmit="stt(event)" class="grid grid-cols-1 md:grid-cols-5 gap-4">
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="tt-i">Impressora</label><select id="tt-i" class="w-full border rounded-lg px-3 py-2 text-sm" required></select></div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="tt-t">Toner</label><select id="tt-t" class="w-full border rounded-lg px-3 py-2 text-sm" required><option value="">Selecione...</option><option value="CIANO">Ciano</option><option value="MAGENTA">Magenta</option><option value="AMARELO">Amarelo</option><option value="PRETO">Preto</option></select></div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="tt-d">Data da troca</label><input id="tt-d" type="date" class="w-full border rounded-lg px-3 py-2 text-sm" required></div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="tt-c">Contador na troca</label><input id="tt-c" type="number" min="0" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Opcional"></div>
+       <div><label class="text-xs font-medium text-gray-600 block mb-1" for="tt-o">Observação</label><input id="tt-o" class="w-full border rounded-lg px-3 py-2 text-sm" placeholder="Opcional"></div>
+       <div class="md:col-span-5 flex items-end"><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-6 py-2 rounded-lg">Registrar troca</button></div>
+      </form>
+     </div>
+     <div class="bg-white rounded-xl shadow-sm p-5 mb-5">
+      <div class="flex items-center justify-between mb-3 flex-wrap gap-3"><div><h3 class="font-semibold text-gray-800">Últimas trocas registradas</h3><p class="text-xs text-gray-500 mt-1">O histórico é separado da movimentação de estoque.</p></div></div>
+      <div class="overflow-auto"><table class="tc"><thead><tr><th>Impressora</th><th>Toner</th><th>Data da troca</th><th>Contador</th><th>Duração do ciclo</th><th>Cópias</th></tr></thead><tbody id="tt-b"></tbody></table></div>
+     </div>
+     <div class="bg-white rounded-xl shadow-sm p-5">
+      <div class="flex items-center justify-between mb-3 flex-wrap gap-3">
+       <h3 class="font-semibold text-gray-800">Posição de Estoque</h3>
+       <div class="flex gap-2">
+        <button id="edel-btn" onclick="delEM()" class="bg-red-600 hover:bg-red-700 text-white text-sm px-3 py-2 rounded-lg hidden"><i data-lucide="trash-2" style="width:16px;height:16px"></i> Deletar</button> <button onclick="pe()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg"><i data-lucide="printer" style="width:16px;height:16px"></i> Imprimir</button>
+       </div>
+      </div>
+      <div class="overflow-auto">
+       <table class="tc">
+        <thead>
+         <tr>
+          <th>Impressora</th>
+          <th>Toner</th>
+          <th>Saldo atual</th>
+         </tr>
+        </thead>
+        <tbody id="eb"></tbody>
+       </table>
+      </div>
+     </div>
+     <div class="bg-white rounded-xl shadow-sm p-5 mt-5">
+      <div class="flex items-center justify-between mb-3 flex-wrap gap-3">
+       <div>
+        <h3 class="font-semibold text-gray-800">Histórico de movimentações</h3>
+        <p class="text-xs text-gray-500 mt-1">Excluir o histórico não altera o estoque atual.</p>
+       </div>
+       <button id="edel-btn" onclick="delEM()" class="bg-red-600 hover:bg-red-700 text-white text-sm px-3 py-2 rounded-lg hidden"><i data-lucide="trash-2" style="width:16px;height:16px"></i> Excluir histórico</button>
+      </div>
+      <div class="overflow-auto">
+       <table class="tc">
+        <thead>
+         <tr>
+          <th style="width:40px"><input type="checkbox" id="es-all" onchange="tgESA(this)" title="Selecionar todos"></th>
+          <th>Impressora</th>
+          <th>Toner</th>
+          <th>Cor</th>
+          <th>Entrada</th>
+          <th>Saída</th>
+          <th>Data</th>
+         </tr>
+        </thead>
+        <tbody id="emh-b"></tbody>
+       </table>
+      </div>
+      </div>
+     </div>
+    </div><!-- CONFIGURAÇÕES -->
+    <div class="sv" id="v-configuracoes">
+     <div class="config-shell">
+      <div class="bg-white rounded-xl shadow-sm p-6 md:p-8 w-full">
+       <div class="mb-6">
+        <h3 class="font-semibold text-gray-800 text-lg">Parâmetros de Previsão</h3>
+        <p class="text-sm text-gray-500 mt-1">A previsão agora usa o histórico real de trocas de cada impressora e toner. Os parâmetros abaixo controlam somente a confiança, os alertas e as novas tentativas.</p>
+       </div>
+       <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5 w-full">
+        <div class="border border-gray-200 rounded-xl p-4 bg-gray-50/40"><label class="text-xs font-medium text-gray-600 block mb-2" for="c-im">Mínimo de ciclos para previsão</label><input id="c-im" type="number" min="1" max="50" value="2" class="w-full border rounded-lg px-3 py-2.5 text-sm"><p class="text-[11px] text-gray-400 mt-2">Quantidade de ciclos completos antes de estimar a próxima troca.</p></div>
+        <div class="border border-gray-200 rounded-xl p-4 bg-gray-50/40"><label class="text-xs font-medium text-gray-600 block mb-2" for="c-js">Antecedência para alerta (dias)</label><input id="c-js" type="number" min="0" max="365" value="10" class="w-full border rounded-lg px-3 py-2.5 text-sm"><p class="text-[11px] text-gray-400 mt-2">Quantos dias antes da previsão o sistema deve sinalizar atenção.</p></div>
+        <div class="border border-gray-200 rounded-xl p-4 bg-gray-50/40"><label class="text-xs font-medium text-gray-600 block mb-2" for="c-lr">Limite de negativas</label><input id="c-lr" type="number" min="1" max="20" value="3" class="w-full border rounded-lg px-3 py-2.5 text-sm"><p class="text-[11px] text-gray-400 mt-2">Quantidade de negativas consecutivas para elevar o nível de risco.</p></div>
+        <div class="border border-gray-200 rounded-xl p-4 bg-gray-50/40"><label class="text-xs font-medium text-gray-600 block mb-2" for="c-rt">Nova tentativa após negativa (dias)</label><input id="c-rt" type="number" min="0" max="365" value="30" class="w-full border rounded-lg px-3 py-2.5 text-sm"><p class="text-[11px] text-gray-400 mt-2">Prazo usado para orientar uma nova solicitação após uma negativa.</p></div>
+       </div>
+       <div class="mt-6 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-xs text-blue-800">A média de duração e a próxima troca são calculadas automaticamente a partir das trocas reais registradas para cada impressora e cor. Não é mais necessário informar um consumo médio fixo.</div>
+       <div class="flex items-center gap-3 mt-6"><button onclick="sc()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-6 py-2.5 rounded-lg">Salvar parâmetros</button><p id="cm" class="text-sm text-green-600 hidden">Salvo!</p></div>
+      </div>
+     </div>
+    </div><!-- EXPORTAÇÃO -->
+    <div class="sv" id="v-exportacao">
+     <div class="bg-white rounded-xl shadow-sm p-5">
+      <h3 class="font-semibold text-gray-800 mb-4">Exportar Dados</h3>
+      <p class="text-sm text-gray-600 mb-4">Exporte todos os dados em CSV.</p><button onclick="ex()" class="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg flex items-center gap-2"><i data-lucide="file-spreadsheet" style="width:20px;height:20px"></i> Exportar CSV</button>
+     </div>
+    </div>
+   </main>
+  </div>
+  <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-4 py-3 rounded-lg shadow-lg text-sm hidden z-50"></div>
+  <script>
+const INV=[]; // Base inicial vazia. O Supabase é a única fonte de dados.
+let D=[],cfg={min_ciclos:2,antecedencia_alerta:10,limite_risco:3,regra_tentativa:30};
+try{const s=localStorage.getItem('sgt_cfg5');if(s)Object.assign(cfg,JSON.parse(s))}catch(e){}
+function loadConfigForm(){const a=document.getElementById('c-im'),b=document.getElementById('c-js'),c=document.getElementById('c-lr'),d=document.getElementById('c-rt');if(a)a.value=Math.max(1,Number(cfg.min_ciclos)||2);if(b)b.value=Math.max(0,Number(cfg.antecedencia_alerta)||10);if(c)c.value=Math.max(1,Number(cfg.limite_risco)||3);if(d)d.value=Math.max(0,Number(cfg.regra_tentativa)||30)}
+function legacyKey(r){if(r.__backendId)return'backend:'+r.__backendId;const fields=['tipo_registro','tipo','impressora','nome_suprimento','toner_modelo','status','data_solicitacao','data_analise','data_leitura','data_evento','responsavel','cor_negada','estoque_entrada','estoque_saida'];return'legacy:'+fields.map(k=>String(r[k]??'')).join('|')}
+function normalizeRecord(raw){const r={...raw};if(!r.tipo_registro)r.tipo_registro=r.tipo||r.record_type||'';if(r.tipo_registro==='request'||r.tipo_registro==='solicitação')r.tipo_registro='solicitacao';if(r.tipo_registro==='printer'||r.tipo_registro==='impressora_cadastrada')r.tipo_registro='impressora';if(r.tipo_registro==='stock'||r.tipo_registro==='movimentacao'||r.tipo_registro==='movimentação')r.tipo_registro='estoque';if(r.tipo_registro==='audit'||r.tipo_registro==='evento')r.tipo_registro='historico';if(r.tipo_registro==='analysis'||r.tipo_registro==='análise')r.tipo_registro='justificativa';if(!r.nome_suprimento&&r.suprimento)r.nome_suprimento=r.suprimento;if(!r.toner_modelo&&r.nome_suprimento)r.toner_modelo=r.nome_suprimento;if(!r.cor_negada&&r.cor)r.cor_negada=r.cor;if(!r.status&&r.situacao)r.status=r.situacao;if(r.status==='ACEITA'||r.status==='ACEITO')r.status='APROVADO';if(r.status==='RECEBIDA')r.status='RECEBIDO';if(r.deletado===undefined)r.deletado=false;r.__stableKey=legacyKey(r);return r}
+function mergePersisted(current,incoming){const map=new Map();[...(current||[]),...(incoming||[])].map(normalizeRecord).forEach(r=>{const key=r.__backendId?'backend:'+r.__backendId:r.__stableKey;const old=map.get(key);map.set(key,old?{...old,...r}:r)});return[...map.values()]}
+function gS(){return D.filter(r=>r.tipo_registro==='solicitacao'&&!r.deletado)}
+function gP(){return D.filter(r=>r.tipo_registro==='impressora'&&!r.deletado)}
+function gE(){return D.filter(r=>r.tipo_registro==='estoque'&&!r.deletado)}
+function gH(){return D.filter(r=>r.tipo_registro==='historico'&&!r.deletado)}
+function gJ(){return D.filter(r=>r.tipo_registro==='justificativa'&&!r.deletado)}
+function gI(name,cor){return[...gJ().filter(x=>x.impressora===name&&(!cor||!x.cor_negada||x.cor_negada===cor)),...gS().filter(x=>x.impressora===name&&x.status==='RECEBIDO'&&(!cor||!x.cor_negada||x.cor_negada===cor))].sort((a,b)=>(b.data_solicitacao||b.data_analise||b.data_leitura||'').localeCompare(a.data_solicitacao||a.data_analise||a.data_leitura||''))}
+function gN(){const n=new Set(INV.map(x=>x.i));gP().forEach(p=>{if(p.impressora)n.add(p.impressora)});return[...n]}
+function e(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function nd(v){const s=String(v||'').trim();if(!s)return 0;return parseFloat(s.replace(/\./g,'').replace(/,/g,'.'))||0}
+function fd(n,d=2){const v=Number(n);if(isNaN(v))return'0,00';return v.toLocaleString('pt-BR',{minimumFractionDigits:d,maximumFractionDigits:d})}
+function fD(d){if(!d)return'-';try{return new Date(d).toLocaleDateString('pt-BR')}catch(x){return String(d)}}
+function fDT(d){if(!d)return'-';try{const x=new Date(d);return x.toLocaleDateString('pt-BR')+' '+x.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}catch(x){return d}}
+function sb(s){const u=(s||'').toUpperCase();if(u==='NEGADO')return'<span class="badge bg-red-100 text-red-700">NEGADO</span>';if(u==='APROVADO')return'<span class="badge bg-green-100 text-green-700">APROVADO</span>';if(u==='ESPERANDO RECEBIMENTO')return'<span class="badge bg-orange-100 text-orange-700">ESP.RECEB.</span>';if(u==='RECEBIDO')return'<span class="badge bg-emerald-100 text-emerald-700">RECEBIDO</span>';if(u.includes('ENTRADA'))return'<span class="badge bg-blue-100 text-blue-700">ENT.ESTOQUE</span>';if(u==='PENDENTE')return'<span class="badge bg-yellow-100 text-yellow-700">PENDENTE</span>';return'<span class="badge bg-gray-100 text-gray-600">'+e(s||'-')+'</span>'}
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.remove('hidden');setTimeout(()=>t.classList.add('hidden'),3000)}
+function mr(){return{tipo_registro:'',impressora:'',setor:'',fabricante:'',modelo:'',cor_tipo:'',status:'',ip:'',mac:'',numero_serie:'',patrimonio:'',toner_modelo:'',nome_suprimento:'',vida_util_copias:0,contador_atual:0,ultima_troca_req:0,data_ultima_troca:'',saldo_produzido:0,pct_produzido:0,pct_permitido:0,pct_faltante:0,copias_faltantes:0,previsao_nova_tentativa:'',observacoes:'',data_solicitacao:'',data_analise:'',nivel_atual:0,data_leitura:'',data_troca:'',contador_troca:null,consumo_diario:0,previsao_esgotamento:'',estoque_entrada:0,estoque_saida:0,estoque_saldo:0,criticidade:'',responsavel:'',centro_custo:'',localizacao:'',ciano:0,magenta:0,amarelo:0,preto:0,status_estoque:'',motivo_negativa:'',data_critica:'',janela_seguranca:0,peso_negativa:0,sequencia_negativas:0,status_anterior:'',novo_status:'',data_evento:'',tipo_evento:'',ref_solicitacao:'',deletado:false,data_delecao:'',motivo_delecao:'',data_edicao:'',versao_anterior:''}}
+function printerList(){return gP().slice().sort((a,b)=>{const f=(a.fabricante||'').localeCompare(b.fabricante||'','pt-BR',{sensitivity:'base'});if(f)return f;const m=(a.modelo||'').localeCompare(b.modelo||'','pt-BR',{sensitivity:'base'});if(m)return m;return (a.impressora||'').localeCompare(b.impressora||'','pt-BR',{sensitivity:'base'})})}
+function pps(id){const s=document.getElementById(id);if(!s)return;s.innerHTML='<option value="">Selecione...</option>'+printerList().map(p=>`<option value="${e(p.impressora)}">${e(p.impressora)}</option>`).join('')}
+function sw(v){document.querySelectorAll('.sv').forEach(x=>x.classList.remove('active'));const t=document.getElementById('v-'+v);if(t)t.classList.add('active');document.querySelectorAll('.nav-item').forEach(x=>{x.classList.toggle('active',x.dataset.view===v);x.classList.toggle('text-white',x.dataset.view===v);x.classList.toggle('text-white/70',x.dataset.view!==v)});const ti={dashboard:'Dashboard',solicitacoes:'Solicitações',estoque:'Estoque','momento-ideal':'Momento Ideal',cadastro:'Cadastro',justificativa:'Análise de solicitações',historico:'Histórico',configuracoes:'Configurações',exportacao:'Exportação'};document.getElementById('vt').textContent=ti[v]||v;if(v==='solicitacoes')pps('s-i');if(v==='historico'){phf();rH()}if(v==='momento-ideal')pms();if(v==='justificativa')pjs();if(v==='estoque')pps('e-i');if(v==='cadastro')rC();if(v==='configuracoes')loadConfigForm()}
+function phf(){const s=document.getElementById('hf');if(!s)return;s.innerHTML='<option value="">Todas impressoras</option>'+printerList().map(p=>`<option value="${e(p.impressora)}">${e(p.impressora)}</option>`).join('')}
+function pms(){const s=document.getElementById('mp');if(!s)return;s.innerHTML='<option value="">Selecione...</option>'+printerList().map(p=>`<option value="${e(p.impressora)}">${e(p.impressora)}</option>`).join('')}
+function pjs(){const s=document.getElementById('jp');if(!s)return;s.innerHTML='<option value="">Selecione impressora...</option>'+printerList().map(p=>`<option value="${e(p.impressora)}">${e(p.impressora)}${p.numero_serie?' — Série: '+e(p.numero_serie):''}</option>`).join('');rJ();uj_cr()}
+function uj_cr(){const p=(document.getElementById('jp')||{}).value||'';const coloridas=['CANON','RICOH','XEROX'];const isColor=coloridas.some(c=>p.toUpperCase().includes(c));const wrap=document.getElementById('j-cor-wrapper');if(wrap){if(isColor)wrap.classList.remove('hidden');else wrap.classList.add('hidden')}}
+
+async function che(imp,sup,sa,ns,mot,resp,obs,ref){if(D.length>=999)return;const r=mr();r.tipo_registro='historico';r.impressora=imp;r.nome_suprimento=sup||'';r.status_anterior=sa||'';r.novo_status=ns||'';r.motivo_negativa=mot||'';r.responsavel=resp||'';r.observacoes=obs||'';r.ref_solicitacao=ref||'';r.data_evento=new Date().toISOString();r.tipo_evento=ns;await window.dataSdk.create(r)}
+
+const dh={onDataChanged(data){if(!Array.isArray(data))return;D=data.map(normalizeRecord);rAll();rInv()}};
+async function init(){try{const r=await window.dataSdk.init(dh);if(!r.isOk){toast('Erro ao inicializar');return r}uc();setInterval(uc,60000);rInv();return {isOk:true}}catch(error){console.error('SGT init',error);return {isOk:false,error}}}
+function uc(){const n=new Date();const el=document.getElementById('dt');if(el)el.textContent=n.toLocaleDateString('pt-BR')+' '+n.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}
+function rAll(){rInv();rDash();rSol();rC();rH();rMI();rEst();rJ();rTrocas()}
+
+function balanceMap(){const map={};(window.sgtStockBalances||[]).forEach(b=>{const p=gP().find(x=>x.__backendId===b.impressora_id);if(!p)return;const k=p.impressora+'|||'+b.cor;if(!map[k])map[k]={i:p.impressora,t:b.cor,en:0,sa:0,s:p.numero_serie||'',q:0,marca:p.fabricante||''};map[k].q=Math.max(0,Number(b.quantidade)||0)});return map}
+function currentPrinterStock(){const map={};printerList().forEach(p=>{map[p.impressora]={i:p.impressora,c:0,m:0,a:0,p:0,s:p.numero_serie||'',cl:(p.fabricante||'').toUpperCase()!=='SAMSUNG'||true,marca:p.fabricante||''}});(window.sgtStockBalances||[]).forEach(b=>{const p=gP().find(x=>x.__backendId===b.impressora_id);if(!p)return;if(!map[p.impressora])map[p.impressora]={i:p.impressora,c:0,m:0,a:0,p:0,s:p.numero_serie||'',cl:true,marca:p.fabricante||''};const cor=(b.cor||'').toUpperCase();const q=Math.max(0,Number(b.quantidade)||0);if(cor==='CIANO')map[p.impressora].c=q;else if(cor==='MAGENTA')map[p.impressora].m=q;else if(cor==='AMARELO')map[p.impressora].a=q;else if(cor==='PRETO')map[p.impressora].p=q});return map}
+function cKPI(){const invMap=currentPrinterStock();let cr=0,at=0,ok=0;Object.values(invMap).forEach(inv=>{const fabricante=(inv.marca||'').toUpperCase();if(fabricante.includes('SAMSUNG')){if(inv.p===0)cr++;else ok++}else{const zeros=(inv.c===0?1:0)+(inv.m===0?1:0)+(inv.a===0?1:0)+(inv.p===0?1:0);if(zeros>=3)cr++;else if(zeros===2)at++;else ok++}});return{cr,at,ok}}
+function rDash(){const allSols=gS();const openSols=allSols.filter(s=>!s.deletado&&(s.status==='PENDENTE'||s.status==='APROVADO'||s.status==='ESPERANDO RECEBIMENTO'));const kpi=cKPI();document.getElementById('k-s').textContent=openSols.length;document.getElementById('k-c').textContent=kpi.cr;document.getElementById('k-a').textContent=kpi.at;document.getElementById('k-o').textContent=kpi.ok}
+function rInv(){const tb=document.getElementById('inv-b');if(!tb)return;const invMap=currentPrinterStock();tb.innerHTML=printerList().map(p=>{const x=invMap[p.impressora]||{i:p.impressora,c:0,m:0,a:0,p:0,s:p.numero_serie||'',cl:true,marca:p.fabricante||''};let status='OK';let statusBadge='<span class="badge bg-green-100 text-green-700">OK</span>';const isSamsung=(x.marca||'').toUpperCase().includes('SAMSUNG');const zeros=isSamsung?(x.p===0?1:0):(x.c===0?1:0)+(x.m===0?1:0)+(x.a===0?1:0)+(x.p===0?1:0);if(isSamsung){if(x.p===0){status='Crítico';statusBadge='<span class="badge bg-red-100 text-red-700">Crítico</span>'}}else{if(zeros>=3){status='Crítico';statusBadge='<span class="badge bg-red-100 text-red-700">Crítico</span>'}else if(zeros===2){status='Atenção';statusBadge='<span class="badge bg-amber-100 text-amber-700">Atenção</span>'}}const z=status==='Crítico'?'inv-critical':status==='Atenção'?'inv-warning':'inv-ok';const cell=(v)=>Number(v)===0?'<span class="inline-flex min-w-[28px] justify-center rounded-md bg-red-100 text-red-700 font-bold px-2 py-1">0</span>':String(v);return`<tr class="${z}"><td class="font-medium">${e(p.impressora)}</td><td class="text-center">${isSamsung?'—':cell(x.c)}</td><td class="text-center">${isSamsung?'—':cell(x.m)}</td><td class="text-center">${isSamsung?'—':cell(x.a)}</td><td class="text-center">${cell(x.p)}</td><td class="text-gray-500 text-xs font-mono">${e(x.s||'-')}</td><td>${statusBadge}</td></tr>`}).join('')}
+
+function rSol(){const f=(document.getElementById('fil-st')||{}).value||'';let sols=gS();if(f)sols=sols.filter(s=>s.status===f);sols.sort((a,b)=>(b.data_solicitacao||'').localeCompare(a.data_solicitacao||''));const tb=document.getElementById('sol-b');if(!tb)return;tb.innerHTML=sols.map(s=>{const id=s.__backendId,st=s.status;let ac='';if(st==='PENDENTE'){ac+=`<button onclick="cs('${id}','APROVADO')" class="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">Apr</button> <button onclick="cs('${id}','NEGADO')" class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded">Neg</button> <button onclick="cs('${id}','ESPERANDO RECEBIMENTO')" class="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded">Esp</button> `}else if(st==='APROVADO'){ac+=`<button onclick="cs('${id}','ESPERANDO RECEBIMENTO')" class="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded">Esp</button> `}else if(st==='ESPERANDO RECEBIMENTO'){ac+=`<button onclick="cs('${id}','RECEBIDO')" class="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded">Rec</button> `}ac+=`<button onclick="oem('${id}')" class="text-xs text-blue-500">✏️</button> <button onclick="rd('${id}')" class="text-xs text-red-500">🗑</button>`;return`<tr><td>${e(s.impressora)}</td><td>${e(s.nome_suprimento)}</td><td>${s.data_solicitacao||'-'}</td><td>${sb(s.status)}</td><td>${e(s.responsavel)}</td><td class="max-w-[80px] truncate">${e(s.observacoes)}</td><td class="whitespace-nowrap">${ac}</td></tr>`}).join('')||'<tr><td colspan="7" class="text-center text-gray-400 py-4">—</td></tr>'}
+
+async function ss(ev){ev.preventDefault();if(D.length>=999){toast('Limite!');return}const imp=document.getElementById('s-i').value;if(!imp){toast('Selecione impressora');return}const r=mr();r.tipo_registro='solicitacao';r.impressora=imp;const ton=document.getElementById('s-s').value;r.nome_suprimento=ton;r.toner_modelo=ton;r.cor=ton;r.data_solicitacao=new Date().toISOString().split('T')[0];r.status='PENDENTE';const ca=document.getElementById('s-ca').value.trim();r.contador_solicitacao=ca===''?null:Math.max(0,parseInt(ca,10)||0);r.contador_atual=r.contador_solicitacao;r.responsavel=document.getElementById('s-r').value;r.observacoes=document.getElementById('s-o').value;toast('Salvando...');const res=await window.dataSdk.create(r);if(res.isOk){toast('Criada!');document.getElementById('sf').classList.add('hidden');ev.target.reset();await che(imp,r.nome_suprimento,'','PENDENTE','',r.responsavel,'','')}else toast('Erro')}
+
+async function cs(id,ns){const rec=D.find(r=>r.__backendId===id);if(!rec)return;const os=rec.status;if(ns==='RECEBIDO'){const atual=await ip('Contador no recebimento:');if(atual===null){return}if(!/^\d+$/.test(String(atual).trim())){toast('Contador inválido.');return}rec.contador_recebimento=Math.max(0,parseInt(atual,10));rec.contador_atual=rec.contador_recebimento;}rec.status=ns;if(ns==='NEGADO'){const m=await ip('Motivo:');if(m===null){rec.status=os;return}rec.motivo_negativa=m}rec.data_analise=new Date().toISOString().split('T')[0];toast('Atualizando...');const r=await window.dataSdk.update(rec);if(r.isOk){toast('Atualizado!');await che(rec.impressora,rec.nome_suprimento,os,ns,rec.motivo_negativa||'',rec.responsavel,'',id);if(ns==='RECEBIDO'&&D.length<999){let cor=rec.cor||'';if(!cor){cor=(await ip('Cor do toner (CIANO, MAGENTA, AMARELO ou PRETO):')||'').trim().toUpperCase();if(!['CIANO','MAGENTA','AMARELO','PRETO'].includes(cor)){toast('Recebimento cancelado: informe uma cor válida.');return}}const er=mr();er.tipo_registro='estoque';er.impressora=rec.impressora;er.toner_modelo=rec.nome_suprimento;er.nome_suprimento=rec.nome_suprimento;er.cor=cor;er.estoque_entrada=1;er.ref_solicitacao=id;er.data_leitura=new Date().toISOString();const estRes=await window.dataSdk.create(er);if(estRes.isOk){await che(rec.impressora,rec.nome_suprimento,'RECEBIDO','ENTRADA ESTOQUE','',rec.responsavel,'',id);toast('Estoque atualizado!')}else{toast('Aviso: Solicitação confirmada mas estoque não foi atualizado')}}}else{rec.status=os;toast('Erro')}}
+
+function ip(msg){return new Promise(resolve=>{const ov=document.createElement('div');ov.className='fixed inset-0 bg-black/40 flex items-center justify-center z-[100]';ov.innerHTML=`<div class="bg-white rounded-xl p-6 w-96 shadow-2xl"><p class="text-sm font-medium text-gray-700 mb-3">${msg}</p><input id="ipi" class="w-full border rounded-lg px-3 py-2 text-sm mb-4" autofocus><div class="flex gap-2 justify-end"><button id="ipc" class="px-4 py-2 text-sm bg-gray-200 rounded-lg">Cancelar</button><button id="ipo" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg">OK</button></div></div>`;document.body.appendChild(ov);const inp=ov.querySelector('#ipi');inp.focus();ov.querySelector('#ipo').onclick=()=>{document.body.removeChild(ov);resolve(inp.value)};ov.querySelector('#ipc').onclick=()=>{document.body.removeChild(ov);resolve(null)};inp.onkeydown=ev=>{if(ev.key==='Enter'){document.body.removeChild(ov);resolve(inp.value)}}})}
+
+function rC(){const ps=printerList();const tb=document.getElementById('cad-b');if(!tb)return;tb.innerHTML=ps.map(p=>`<tr><td>${e(p.setor)}</td><td>${e(p.fabricante)}</td><td>${e(p.modelo)}</td><td>${e(p.ip)}</td><td><span class="badge ${p.status==='ATIVA'?'bg-green-100 text-green-700':p.status==='MANUTENÇÃO'?'bg-yellow-100 text-yellow-700':'bg-gray-100 text-gray-600'}">${e(p.status)}</span></td><td>${e(p.numero_serie)}</td><td><button onclick="rd('${p.__backendId}')" class="text-red-500 text-xs">Excluir</button></td></tr>`).join('')||'<tr><td colspan="7" class="text-center text-gray-400 py-4">—</td></tr>'}
+async function sp(ev){ev.preventDefault();if(D.length>=999){toast('Limite!');return}const r=mr();r.tipo_registro='impressora';r.setor=document.getElementById('f-s').value;r.fabricante=document.getElementById('f-f').value;r.modelo=document.getElementById('f-m').value;r.impressora=r.fabricante+' '+r.modelo+' ('+r.setor+')';r.status=document.getElementById('f-st').value;r.ip=document.getElementById('f-ip').value;r.numero_serie=document.getElementById('f-sr').value;toast('Salvando...');const res=await window.dataSdk.create(r);if(res.isOk){toast('Cadastrada!');document.getElementById('pf').classList.add('hidden');ev.target.reset()}else toast('Erro')}
+
+function rH(){const fp=(document.getElementById('hf')||{}).value||'';const fs=(document.getElementById('hsf')||{}).value||'';let h=gH();if(fp)h=h.filter(x=>x.impressora===fp);if(fs)h=h.filter(x=>x.novo_status===fs||x.tipo_evento===fs);h.sort((a,b)=>(b.data_evento||'').localeCompare(a.data_evento||''));const tb=document.getElementById('hb');if(!tb)return;tb.innerHTML=h.map(x=>`<tr><td><input type="checkbox" class="hs-ch" data-hid="${x.__backendId}"></td><td class="whitespace-nowrap">${fDT(x.data_evento)}</td><td>${e(x.impressora)}</td><td>${e(x.nome_suprimento)}</td><td>${x.status_anterior?sb(x.status_anterior):'-'}</td><td>${sb(x.novo_status)}</td><td class="max-w-[100px] truncate">${e(x.motivo_negativa)}</td><td>${e(x.responsavel)}</td><td><button onclick="oem('${x.__backendId}')" class="text-blue-500 text-xs mr-1">✏️</button><button onclick="rd('${x.__backendId}')" class="text-red-500 text-xs">🗑</button></td></tr>`).join('')||'<tr><td colspan="9" class="text-center text-gray-400 py-4">—</td></tr>'}
+
+function rJ(){const p=(document.getElementById('jp')||{}).value||'';const btn=document.getElementById('jfb');const ld=document.getElementById('jl');const tb=document.getElementById('jb');if(!p){if(btn)btn.classList.add('hidden');if(ld)ld.innerHTML='';if(tb)tb.innerHTML='<tr><td colspan="7" class="text-center text-gray-400 py-4">Selecione impressora</td></tr>';return}if(btn)btn.classList.remove('hidden');const js=gJ().filter(j=>j.impressora===p).sort((a,b)=>(b.data_solicitacao||'').localeCompare(a.data_solicitacao||''));if(!js.length){if(ld)ld.innerHTML='<p class="text-gray-400 text-center py-4">Sem análises</p>';if(tb)tb.innerHTML='<tr><td colspan="7" class="text-center text-gray-400 py-4">—</td></tr>';return}const l=js[0];const cl=l.status==='NEGADO'?'sem-c':(l.status==='POSITIVO'||l.status==='RECEBIDO'?'sem-o':'sem-a');if(ld)ld.innerHTML=`<h4 class="font-semibold text-gray-800 mb-3">Última Análise</h4><div class="rounded-lg p-4 ${cl}"><div class="grid grid-cols-3 gap-4"><div><p class="text-xs uppercase font-medium">Suprimento</p><p class="text-sm font-bold">${e(l.nome_suprimento)}</p></div><div><p class="text-xs uppercase font-medium">Cor</p><p class="text-sm font-bold">${l.cor_negada?e(l.cor_negada):'—'}</p></div><div><p class="text-xs uppercase font-medium">Status</p><p class="text-sm font-bold">${sb(l.status)}</p></div></div><div class="mt-3 pt-3 border-t border-gray-300/30"><p class="text-xs uppercase font-medium">Motivo</p><p class="text-sm">${e(l.motivo_negativa)}</p></div></div>`;if(tb)tb.innerHTML=js.map(j=>`<tr><td>${j.data_solicitacao||'-'}</td><td>${e(j.nome_suprimento)}</td><td class="text-center">${j.cor_negada?e(j.cor_negada):'—'}</td><td class="text-center">${fd(j.pct_produzido)}%</td><td class="max-w-[120px] truncate">${e(j.motivo_negativa)}</td><td>${sb(j.status)}</td><td>${e(j.responsavel)}</td><td><button onclick="oem('${j.__backendId}')" class="text-blue-500 text-xs mr-1">✏️</button><button onclick="rd('${j.__backendId}')" class="text-red-500 text-xs">🗑</button></td></tr>`).join('')}
+
+async function sj(ev){ev.preventDefault();const p=(document.getElementById('jp')||{}).value;if(!p){toast('Selecione impressora');return}if(D.length>=999){toast('Limite!');return}const tipoAnalise=document.getElementById('j-tipo').value;const isPositiva=tipoAnalise==='POSITIVO';const r=mr();r.tipo_registro='justificativa';r.impressora=p;const ton=document.getElementById('j-ns').value;if(!ton){toast('Selecione o toner');return}r.nome_suprimento=ton;r.toner_modelo=ton;r.cor_negada=ton;if(!isPositiva){const obrigatorios=[['j-vu','Vida útil'],['j-ca','Contador atual'],['j-ut','Cont. última troca'],['j-dt','Data última troca'],['j-sp','Saldo produzido'],['j-pp','% produzido'],['j-pm','% permitido']];const ausente=obrigatorios.find(([id])=>!String(document.getElementById(id).value||'').trim());if(ausente){toast('Preencha '+ausente[1]);return}}r.vida_util_copias=parseInt(document.getElementById('j-vu').value)||0;r.contador_atual=parseInt(document.getElementById('j-ca').value)||0;r.ultima_troca_req=parseInt(document.getElementById('j-ut').value)||0;r.data_ultima_troca=document.getElementById('j-dt').value;r.saldo_produzido=nd(document.getElementById('j-sp').value);r.pct_produzido=nd(document.getElementById('j-pp').value);r.pct_permitido=parseFloat(document.getElementById('j-pm').value)||0;r.motivo_negativa=document.getElementById('j-mo').value;r.status=document.getElementById('j-tipo').value==='POSITIVO'?'POSITIVO':document.getElementById('j-st').value;r.tipo_analise=document.getElementById('j-tipo').value;r.responsavel=document.getElementById('j-re').value;r.data_solicitacao=document.getElementById('j-ds').value;r.observacoes=document.getElementById('j-ob').value;r.data_analise=new Date().toISOString().split('T')[0];toast('Salvando...');const res=await window.dataSdk.create(r);if(res.isOk){await che(p,r.nome_suprimento,'',r.status,r.motivo_negativa,r.responsavel,r.observacoes,'');document.getElementById('jfc').classList.add('hidden');ev.target.reset();uj_cr();toast('Negativa salva!')}else toast('Erro')}
+
+function rEst(){const tb=document.getElementById('eb');if(!tb)return;const rows=Object.values(balanceMap()).sort((a,b)=>{const f=(a.i||'').localeCompare(b.i||'','pt-BR',{sensitivity:'base'});if(f)return f;return (a.t||'').localeCompare(b.t||'','pt-BR',{sensitivity:'base'})});tb.innerHTML=rows.map(x=>`<tr><td>${e(x.i)}</td><td>${e(x.t)}</td><td>${x.q}</td></tr>`).join('')||'<tr><td colspan="3" class="text-center text-gray-400 py-4">Nenhum toner em estoque</td></tr>';const hb=document.getElementById('emh-b');if(hb){const hist=gE().slice().sort((a,b)=>(b.data_leitura||'').localeCompare(a.data_leitura||''));hb.innerHTML=hist.map(m=>`<tr><td><input type="checkbox" class="es-ch" data-mid="${m.__backendId}" onchange="uchES()"></td><td>${e(m.impressora)}</td><td>${e(m.toner_modelo||m.nome_suprimento||m.cor||'-')}</td><td>${e(m.cor||'-')}</td><td>${m.estoque_entrada||0}</td><td>${m.estoque_saida||0}</td><td>${fDT(m.data_leitura)}</td></tr>`).join('')||'<tr><td colspan="7" class="text-center text-gray-400 py-4">Nenhuma movimentação no histórico</td></tr>'}}
+function tgHS(){const chks=document.querySelectorAll('.hs-ch');const hasUn=Array.from(chks).some(c=>!c.checked);chks.forEach(c=>c.checked=hasUn);uchHS()}
+function tgHSA(el){const chks=document.querySelectorAll('.hs-ch');chks.forEach(c=>c.checked=el.checked);uchHS()}
+function uchHS(){const chks=document.querySelectorAll('.hs-ch:checked');const btn1=document.getElementById('hs-btn');const btn2=document.getElementById('hdel-btn');const all=document.getElementById('hs-all');if(chks.length>0){btn1.classList.remove('hidden');btn2.classList.remove('hidden');all.checked=document.querySelectorAll('.hs-ch').length===chks.length}else{btn1.classList.add('hidden');btn2.classList.add('hidden');all.checked=false}}
+function tgES(){const chks=document.querySelectorAll('.es-ch');const hasUn=Array.from(chks).some(c=>!c.checked);chks.forEach(c=>c.checked=hasUn);uchES()}
+function tgESA(el){const chks=document.querySelectorAll('.es-ch');chks.forEach(c=>c.checked=el.checked);uchES()}
+function uchES(){const chks=document.querySelectorAll('.es-ch:checked');const btn2=document.getElementById('edel-btn');const all=document.getElementById('es-all');if(chks.length>0){btn2.classList.remove('hidden');all.checked=document.querySelectorAll('.es-ch').length===chks.length}else{btn2.classList.add('hidden');all.checked=false}}
+function delEM(){const chks=Array.from(document.querySelectorAll('.es-ch:checked'));if(!chks.length){toast('Nada selecionado');return}const ov=document.createElement('div');ov.className='fixed inset-0 bg-black/40 flex items-center justify-center z-[100]';ov.innerHTML=`<div class="bg-white rounded-xl p-6 w-96 shadow-2xl"><div class="flex items-center gap-3 mb-4"><i data-lucide="alert-circle" style="width:24px;height:24px;color:#dc2626"></i><h3 class="font-semibold text-gray-800">Excluir ${chks.length} registro(s)?</h3></div><p class="text-sm text-gray-600 mb-6">Ação irreversível.</p><div class="flex gap-3 justify-end"><button id="cdel" class="px-4 py-2 text-sm bg-gray-200 text-gray-700 rounded-lg">Cancelar</button><button id="odel" class="px-4 py-2 text-sm bg-red-600 text-white rounded-lg">Excluir</button></div></div>`;document.body.appendChild(ov);document.getElementById('cdel').onclick=()=>document.body.removeChild(ov);document.getElementById('odel').onclick=async()=>{document.body.removeChild(ov);let cnt=0;for(const ch of chks){const mid=ch.dataset.mid;const rec=D.find(r=>r.__backendId===mid);if(!rec)continue;rec.deletado=true;rec.data_delecao=new Date().toISOString();const r=await window.dataSdk.update(rec);if(r.isOk)cnt++}toast('Excluídos do histórico: '+cnt);rEst();rInv();rDash()};lucide.createIcons()}
+function delHM(){const chks=Array.from(document.querySelectorAll('.hs-ch:checked'));if(!chks.length){toast('Nada selecionado');return}const ov=document.createElement('div');ov.className='fixed inset-0 bg-black/40 flex items-center justify-center z-[100]';ov.innerHTML=`<div class="bg-white rounded-xl p-6 w-96 shadow-2xl"><div class="flex items-center gap-3 mb-4"><i data-lucide="alert-circle" style="width:24px;height:24px;color:#dc2626"></i><h3 class="font-semibold text-gray-800">Excluir ${chks.length} registro(s)?</h3></div><p class="text-sm text-gray-600 mb-6">Ação irreversível.</p><div class="flex gap-3 justify-end"><button id="cdel" class="px-4 py-2 text-sm bg-gray-200 text-gray-700 rounded-lg">Cancelar</button><button id="odel" class="px-4 py-2 text-sm bg-red-600 text-white rounded-lg">Excluir</button></div></div>`;document.body.appendChild(ov);document.getElementById('cdel').onclick=()=>document.body.removeChild(ov);document.getElementById('odel').onclick=async()=>{document.body.removeChild(ov);let cnt=0;for(const ch of chks){const hid=ch.dataset.hid;const rec=D.find(r=>r.__backendId===hid);if(!rec)continue;rec.deletado=true;rec.data_delecao=new Date().toISOString();const r=await window.dataSdk.update(rec);if(r.isOk)cnt++}toast('Excluídos: '+cnt);rH()};lucide.createIcons()}
+async function se(ev){ev.preventDefault();if(D.length>=999){toast('Limite!');return}const imp=document.getElementById('e-i').value;if(!imp){toast('Selecione a impressora');return}const tipo=document.getElementById('e-tp').value;const qtd=parseInt(document.getElementById('e-q').value)||0;const ton=(document.getElementById('e-t').value||'').trim().toUpperCase();if(!ton||!['CIANO','MAGENTA','AMARELO','PRETO'].includes(ton)){toast('Selecione o toner');return}if(!qtd||qtd<1){toast('Informe uma quantidade válida');return}const r=mr();r.tipo_registro='estoque';r.impressora=imp;r.toner_modelo=ton;r.nome_suprimento=ton;r.cor=ton;if(tipo==='saida'){const p=gP().find(x=>x.impressora===imp);const b=(window.sgtStockBalances||[]).find(x=>x.impressora_id===p?.__backendId&&x.cor===ton);const atual=Math.max(0,Number(b?.quantidade)||0);if(qtd>atual){toast('Saída maior que o estoque atual ('+atual+').');return}}r.estoque_entrada=tipo==='entrada'?qtd:0;r.estoque_saida=tipo==='saida'?qtd:0;r.data_leitura=new Date().toISOString();toast('Registrando...');const res=await window.dataSdk.create(r);if(res.isOk){toast('OK!');rEst();ev.target.reset();await che(imp,ton,'',tipo==='entrada'?'ENTRADA ESTOQUE':'SAÍDA ESTOQUE','','','','')}else toast('Erro')}
+
+function setTrocaForm(){const d=document.getElementById('tt-d');if(d&&!d.value)d.value=new Date().toISOString().slice(0,10);pps('tt-i')}
+function rTrocas(){const tb=document.getElementById('tt-b');if(!tb)return;const changes=window.sgtTonerChanges||[];const cycles=window.sgtTonerCycles||[];tb.innerHTML=changes.filter(x=>!x.deletado).slice(0,30).map(t=>{const cyc=cycles.find(c=>c.troca_fim_id===t.id&&c.tipo_ciclo==='TROCA');return`<tr><td>${e(printerList().find(p=>p.__backendId===t.impressora_id)?.impressora||'-')}</td><td>${e(t.cor)}</td><td>${fD(t.data_troca)}</td><td>${t.contador_troca===null||t.contador_troca===undefined?'—':t.contador_troca}</td><td>${cyc?.dias_duracao!=null?fd(cyc.dias_duracao)+' dias':'—'}</td><td>${cyc?.copias_produzidas!=null?cyc.copias_produzidas.toLocaleString('pt-BR'):'—'}</td></tr>`}).join('')||'<tr><td colspan="6" class="text-center text-gray-400 py-4">Nenhuma troca registrada</td></tr>'}
+async function stt(ev){ev.preventDefault();const imp=document.getElementById('tt-i').value;const cor=document.getElementById('tt-t').value;const data=document.getElementById('tt-d').value;const c=document.getElementById('tt-c').value.trim();const obs=document.getElementById('tt-o').value.trim();if(!imp||!cor||!data){toast('Preencha impressora, toner e data da troca');return}try{toast('Registrando troca...');await window.sgtAuth.registrarTroca({impressora:imp,cor,data_troca:new Date(data+'T12:00:00').toISOString(),contador_troca:c===''?null:Math.max(0,parseInt(c,10)||0),observacoes:obs});toast('Troca registrada!');ev.target.reset();setTrocaForm();rTrocas();rMI()}catch(err){console.error('SGT troca',err);toast('Erro ao registrar troca: '+(err.message||'verifique o banco'))}}
+function trocaStats(name,cor){const p=gP().find(x=>x.impressora===name);if(!p)return null;const changes=(window.sgtTonerChanges||[]).filter(x=>!x.deletado&&x.impressora_id===p.__backendId&&x.cor===cor).sort((a,b)=>(b.data_troca||'').localeCompare(a.data_troca||''));if(!changes.length)return null;const cycles=(window.sgtTonerCycles||[]).filter(x=>x.tipo_ciclo==='TROCA'&&x.impressora_id===p.__backendId&&x.cor===cor&&x.dias_duracao!=null&&Number(x.dias_duracao)>0);const avg=cycles.length?cycles.reduce((s,x)=>s+Number(x.dias_duracao||0),0)/cycles.length:null;const last=changes[0];const next=avg?new Date(new Date(last.data_troca).getTime()+avg*86400000):null;const lastCycle=cycles.slice().sort((a,b)=>(b.data_fim||'').localeCompare(a.data_fim||''))[0]||null;return{changes,cycles,avg,last,next,lastCycle}}
+
+function cpfp(name,cor){if(!name)return null;const eventos=gI(name,cor);const ts=trocaStats(name,cor);if(!eventos.length&&!ts)return null;let cn=0;for(const x of eventos){const st=String(x.status||'').toUpperCase();if(st==='NEGADO'){cn++;continue}if(st==='APROVADO'||st==='ACEITO'||st==='POSITIVO'||st==='RECEBIDO')break}const cycles=ts?.cycles?.length||0;const temPrevisao=!!ts&&cycles>=Math.max(1,Number(cfg.min_ciclos)||2)&&!!ts.next;const proxima=temPrevisao?ts.next:null;const alerta=proxima?new Date(proxima.getTime()-Math.max(0,Number(cfg.antecedencia_alerta)||0)*86400000):null;const hj=new Date();let sp='OK';if(cn>=Math.max(1,Number(cfg.limite_risco)||3))sp='CRÍTICO';else if(alerta&&hj>=alerta)sp='ATENÇÃO';return{impressora:name,cor:cor||'PRETO',sp,px:proxima,cr:alerta,l:eventos[0]||{},cn,pct:0,vu:0,restantes:0,cd:ts?.avg||0,ts,cycles,temPrevisao}}
+function cPreds(){const coloridas=['CANON','RICOH','XEROX'];const preds=[];gN().forEach(n=>{const isColor=coloridas.some(c=>n.toUpperCase().includes(c));if(isColor){['CIANO','MAGENTA','AMARELO','PRETO'].forEach(cor=>{const p=cpfp(n,cor);if(p)preds.push(p)})}else{const p=cpfp(n);if(p)preds.push(p)}});return preds}
+
+function rMI(){const sel=(document.getElementById('mp')||{}).value||'';const det=document.getElementById('md');const hb=document.getElementById('mh');if(!sel){if(det)det.innerHTML='<p class="text-gray-400 text-center py-8">Selecione uma impressora.</p>';if(hb)hb.innerHTML='<tr><td colspan="5" class="text-center text-gray-400 py-4">—</td></tr>';return}const coloridas=['CANON','CANNON','RICOH','XEROX'];const isColor=coloridas.some(c=>sel.toUpperCase().includes(c));let prreds=[];if(isColor){['CIANO','MAGENTA','AMARELO','PRETO'].forEach(cor=>{const p=cpfp(sel,cor);const ts=trocaStats(sel,cor);if(p)prreds.push(p);else if(ts)prreds.push({impressora:sel,cor,sp:'OK',px:null,cr:null,l:{},cn:0,ts,cycles:ts.cycles?.length||0,temPrevisao:false})})}else{const p=cpfp(sel,'PRETO');const ts=trocaStats(sel,'PRETO');if(p)prreds.push(p);else if(ts)prreds.push({impressora:sel,cor:'PRETO',sp:'OK',px:null,cr:null,l:{},cn:0,ts,cycles:ts.cycles?.length||0,temPrevisao:false})}if(!prreds.length){if(det)det.innerHTML=`<p class="text-gray-400 text-center py-6">Sem dados de previsão para ${e(sel)}</p>`;if(hb)hb.innerHTML='<tr><td colspan="5" class="text-center text-gray-400 py-4">—</td></tr>';return}if(det)det.innerHTML=prreds.map(pred=>{const cl=pred.sp==='CRÍTICO'?'sem-c':pred.sp==='ATENÇÃO'?'sem-a':'sem-o';const ts=pred.ts||trocaStats(sel,pred.cor);const trocaMedia=ts?.avg;const proximaTroca=ts?.next;const ultimaTroca=ts?.last;const ciclos=ts?.cycles?.length||0;const ultimaDuracao=ts?.lastCycle?.dias_duracao;const ultimasCopias=ts?.lastCycle?.copias_produzidas;const statusText=pred.sp==='OK'&&!pred.temPrevisao?'HISTÓRICO INSUFICIENTE':pred.sp;return`<div class="rounded-xl p-6 ${cl}"><div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4"><div><p class="text-xs uppercase font-medium">Impressora</p><p class="text-sm font-bold mt-1">${e(sel)}</p></div><div><p class="text-xs uppercase font-medium">Cor</p><p class="text-lg font-bold mt-1">${isColor?e(pred.cor):'P&B — PRETO'}</p></div><div><p class="text-xs uppercase font-medium">Status</p><p class="text-sm font-bold mt-1">${statusText}</p></div><div><p class="text-xs uppercase font-medium">Negativas consecutivas</p><p class="text-lg font-bold mt-1">${pred.cn}</p></div></div><div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 pt-4 border-t border-gray-300/30"><div><p class="text-xs font-medium uppercase">Última troca</p><p class="text-sm font-bold mt-1">${ultimaTroca?fD(ultimaTroca.data_troca):'—'}</p></div><div><p class="text-xs font-medium uppercase">Média de duração</p><p class="text-sm font-bold mt-1">${trocaMedia?fd(trocaMedia)+' dias':'Aguardando histórico'}</p></div><div><p class="text-xs font-medium uppercase">Próxima troca estimada</p><p class="text-sm font-bold mt-1">${proximaTroca&&pred.temPrevisao?fD(proximaTroca):'Aguardando ciclos suficientes'}</p></div><div><p class="text-xs font-medium uppercase">Ciclos completos</p><p class="text-sm font-bold mt-1">${ciclos}</p></div></div>${ultimaDuracao!=null||ultimasCopias!=null?`<div class="mt-4 pt-4 border-t border-gray-300/30"><p class="text-xs text-gray-600">Último ciclo: ${ultimaDuracao!=null?fd(ultimaDuracao)+' dias':'—'}${ultimasCopias!=null?' · '+Number(ultimasCopias).toLocaleString('pt-BR')+' cópias':''}</p></div>`:''}${!pred.temPrevisao?`<div class="mt-4 text-xs text-gray-600">A previsão será calculada quando houver pelo menos ${Math.max(1,Number(cfg.min_ciclos)||2)} ciclos completos para esta impressora e cor.</div>`:''}</div>`}).join('');const jusFirst=gI(sel);if(hb)hb.innerHTML=jusFirst.length?jusFirst.slice(0,10).map(j=>`<tr><td>${fD(j.data_solicitacao||j.data_analise||j.data_leitura)}</td><td>${e(j.nome_suprimento||j.toner_modelo||'-')}</td><td>${e(j.cor_negada||'-')}</td><td class="max-w-[120px] truncate">${e(j.motivo_negativa||'-')}</td><td>${e(j.responsavel||'-')}</td></tr>`).join(''):'<tr><td colspan="5" class="text-center text-gray-400 py-4">Sem histórico</td></tr>'}
+async function sc(){cfg.min_ciclos=Math.max(1,parseInt(document.getElementById('c-im').value)||2);cfg.antecedencia_alerta=Math.max(0,parseInt(document.getElementById('c-js').value)||10);cfg.limite_risco=Math.max(1,parseInt(document.getElementById('c-lr').value)||3);cfg.regra_tentativa=Math.max(0,parseInt(document.getElementById('c-rt').value)||30);localStorage.setItem('sgt_cfg5',JSON.stringify(cfg));try{const rr=await window.sgtAuth.saveConfig(cfg);if(rr.error)console.error('SGT: erro ao salvar configuração',rr.error)}catch(e){console.error('SGT: erro ao salvar configuração',e)}const m=document.getElementById('cm');if(m){m.classList.remove('hidden');setTimeout(()=>m.classList.add('hidden'),2000)}rMI()}
+function ex(){if(!D.length){toast('Sem dados');return}const hs=Object.keys(D[0]).filter(k=>k!=='__backendId');let csv=hs.join(',')+'\n';D.forEach(row=>{csv+=hs.map(h=>`"${String(row[h]||'').replace(/"/g,'""')}"`).join(',')+'\n'});const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='SGT_Export.csv';document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);toast('Exportado!')}
+
+function pe(){const movs=gE();const stockMap={};movs.forEach(m=>{const k=(m.impressora||'')+'|||'+(m.toner_modelo||m.nome_suprimento||'')+'|||'+(m.cor||'');if(!stockMap[k])stockMap[k]={i:m.impressora||'',t:m.toner_modelo||m.nome_suprimento||'',en:0,sa:0};stockMap[k].en+=Math.max(0,Number(m.estoque_entrada)||0);stockMap[k].sa+=Math.max(0,Number(m.estoque_saida)||0)});const currentByPrinter={};INV.forEach(x=>{currentByPrinter[x.i]={i:x.i,c:x.c===null?null:Number(x.c)||0,m:x.m===null?null:Number(x.m)||0,a:x.a===null?null:Number(x.a)||0,p:x.p===null?null:Number(x.p)||0,s:x.s}});Object.values(stockMap).forEach(x=>{if(!currentByPrinter[x.i])currentByPrinter[x.i]={i:x.i,c:0,m:0,a:0,p:0,s:'-'};const ton=(x.t||'').toUpperCase();const delta=Math.abs(Number(x.en)||0)-Math.abs(Number(x.sa)||0);const cor=(x.cor||'').toUpperCase();const key=cor==='CIANO'?'c':cor==='MAGENTA'?'m':cor==='AMARELO'?'a':cor==='PRETO'?'p':null;if(key&&currentByPrinter[x.i][key]!==null)currentByPrinter[x.i][key]+=delta});const inventory=Object.values(currentByPrinter);const items=Object.values(stockMap);const now=new Date();const ds=now.toLocaleDateString('pt-BR')+' '+now.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});let h=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Posição de Estoque</title><style>body{font-family:Arial,sans-serif;padding:20px}h1{font-size:18px}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:11px}th{background:#1e3a5f;color:#fff}.pb{display:block;margin-bottom:15px;padding:8px 16px;background:#1e3a5f;color:#fff;border:none;border-radius:4px;cursor:pointer}@media print{.pb{display:none}}</style></head><body><button class="pb" onclick="window.print()">Imprimir</button><h1>SGT Enterprise — Posição de Estoque</h1><p style="color:#666;font-size:12px">Data: ${ds}</p><h2 style="font-size:14px;margin-top:20px">Inventário atual</h2><table><tr><th>Impressora</th><th>C</th><th>M</th><th>A</th><th>K</th><th>Série</th></tr>`;inventory.forEach(x=>{h+=`<tr><td>${x.i}</td><td>${x.c===null?'—':x.c}</td><td>${x.m===null?'—':x.m}</td><td>${x.a===null?'—':x.a}</td><td>${x.p===null?'—':x.p}</td><td>${x.s}</td></tr>`});h+=`</table></body></html>`;const w=window.open('','print');w.document.write(h);w.document.close();w.focus()}
+
+// Delete
+let pid=null,eid=null;
+function rd(id){const rec=D.find(r=>r.__backendId===id);if(!rec)return;pid=id;document.getElementById('del-info').textContent=`${rec.tipo_registro} | ${rec.impressora||'-'} | ${rec.nome_suprimento||rec.toner_modelo||'-'}`;document.getElementById('del-m').classList.remove('hidden')}
+function cdm(){document.getElementById('del-m').classList.add('hidden');pid=null}
+async function cfd(){if(!pid)return;const rec=D.find(r=>r.__backendId===pid);if(!rec){cdm();return}rec.deletado=true;rec.data_delecao=new Date().toISOString();toast('Excluindo...');const r=await window.dataSdk.update(rec);if(r.isOk){toast('Excluído!');if(rec.tipo_registro==='estoque'){rEst();rInv()}else if(rec.tipo_registro==='historico'){rH()}else if(rec.tipo_registro==='justificativa'){rJ()}else if(rec.tipo_registro==='solicitacao'){rSol()}else if(rec.tipo_registro==='impressora'){rC()}}else toast('Erro');cdm()}
+
+function oem(id){const rec=D.find(r=>r.__backendId===id);if(!rec)return;eid=id;const tipo=rec.tipo_registro;document.getElementById('ed-t').textContent=tipo==='solicitacao'?'Editar Solicitação':tipo==='justificativa'?'Editar Negativa':'Editar';const fd2=document.getElementById('ed-flds');fd2.innerHTML='';const fs=gef(tipo);fs.forEach(f=>{const d=document.createElement('div');if(f.tp==='textarea')d.className='md:col-span-2';d.innerHTML=`<label class="text-xs font-medium text-gray-600 block mb-1" for="e-${f.k}">${f.l}</label>`;let el;if(f.tp==='select'){el=document.createElement('select');el.className='w-full border rounded-lg px-3 py-2 text-sm';(f.opts||[]).forEach(o=>{const op=document.createElement('option');op.value=o;op.textContent=o;if(rec[f.k]===o)op.selected=true;el.appendChild(op)})}else if(f.tp==='textarea'){el=document.createElement('textarea');el.className='w-full border rounded-lg px-3 py-2 text-sm';el.rows=3;el.value=rec[f.k]||''}else if(f.tp==='decimal'){el=document.createElement('input');el.className='w-full border rounded-lg px-3 py-2 text-sm';el.type='text';el.inputMode='decimal';el.value=fd(rec[f.k],2)}else{el=document.createElement('input');el.className='w-full border rounded-lg px-3 py-2 text-sm';el.type=f.tp||'text';el.value=rec[f.k]||''}el.id=`e-${f.k}`;d.appendChild(el);fd2.appendChild(d)});document.getElementById('ed-m').classList.remove('hidden')}
+function cem(){document.getElementById('ed-m').classList.add('hidden');eid=null}
+function gef(t){if(t==='solicitacao')return[{k:'impressora',l:'Impressora'},{k:'nome_suprimento',l:'Toner',tp:'select',opts:['CIANO','MAGENTA','AMARELO','PRETO']},{k:'contador_solicitacao',l:'Contador no pedido',tp:'number'},{k:'contador_recebimento',l:'Contador no recebimento',tp:'number'},{k:'data_solicitacao',l:'Data',tp:'date'},{k:'status',l:'Status',tp:'select',opts:['PENDENTE','APROVADO','ESPERANDO RECEBIMENTO','RECEBIDO','NEGADO']},{k:'responsavel',l:'Responsável'},{k:'observacoes',l:'Obs',tp:'textarea'}];if(t==='justificativa')return[{k:'impressora',l:'Impressora'},{k:'nome_suprimento',l:'Toner',tp:'select',opts:['CIANO','MAGENTA','AMARELO','PRETO']},{k:'vida_util_copias',l:'Vida Útil',tp:'number'},{k:'contador_atual',l:'Contador',tp:'number'},{k:'ultima_troca_req',l:'Cont.Últ.Troca',tp:'number'},{k:'data_ultima_troca',l:'Dt.Últ.Troca',tp:'date'},{k:'saldo_produzido',l:'Saldo',tp:'decimal'},{k:'pct_produzido',l:'% Prod.',tp:'decimal'},{k:'pct_permitido',l:'% Permit.',tp:'number'},{k:'motivo_negativa',l:'Motivo',tp:'textarea'},{k:'status',l:'Status',tp:'select',opts:['NEGADO','ANÁLISE EM CURSO']},{k:'responsavel',l:'Responsável'},{k:'data_solicitacao',l:'Data Sol.',tp:'date'},{k:'observacoes',l:'Obs',tp:'textarea'}];if(t==='historico')return[{k:'impressora',l:'Impressora'},{k:'nome_suprimento',l:'Suprimento'},{k:'status_anterior',l:'St.Anterior'},{k:'novo_status',l:'Novo Status'},{k:'motivo_negativa',l:'Motivo',tp:'textarea'},{k:'responsavel',l:'Responsável'}];if(t==='estoque')return[{k:'impressora',l:'Impressora'},{k:'toner_modelo',l:'Toner',tp:'select',opts:['CIANO','MAGENTA','AMARELO','PRETO']},{k:'estoque_entrada',l:'Entrada',tp:'number'},{k:'estoque_saida',l:'Saída',tp:'number'},{k:'data_leitura',l:'Data',tp:'date'}];return[{k:'impressora',l:'Impressora'},{k:'toner_modelo',l:'Toner'},{k:'estoque_entrada',l:'Entrada',tp:'number'},{k:'estoque_saida',l:'Saída',tp:'number'}]}
+async function ser(ev){ev.preventDefault();if(!eid)return;const rec=D.find(r=>r.__backendId===eid);if(!rec)return;const fs=gef(rec.tipo_registro);fs.forEach(f=>{const el=document.getElementById(`e-${f.k}`);if(!el)return;if(f.tp==='decimal')rec[f.k]=nd(el.value);else if(f.tp==='number')rec[f.k]=parseFloat(el.value)||0;else rec[f.k]=el.value});rec.data_edicao=new Date().toISOString();toast('Salvando...');const r=await window.dataSdk.update(rec);if(r.isOk){toast('Salvo!');rAll()}else toast('Erro');cem()}
+
+lucide.createIcons();
+
+async function bootAuth(){
+  const overlay=document.createElement('div');
+  overlay.id='sgt-auth-overlay';
+  overlay.className='sgt-auth-overlay';
+  overlay.innerHTML=`<div class="sgt-auth-card"><div class="text-center mb-6"><div class="mx-auto mb-3 w-12 h-12 rounded-xl flex items-center justify-center" style="background:#1e3a5f"><i data-lucide="printer" style="width:24px;height:24px;color:white"></i></div><h1 class="text-xl font-bold text-gray-800">SGT Enterprise</h1><p class="text-sm text-gray-500 mt-1">Acesso restrito ao sistema de gestão de toners</p></div><form id="sgt-login-form" class="space-y-4"><div><label class="text-xs font-medium text-gray-600 block mb-1">E-mail</label><input id="sgt-login-email" class="sgt-auth-input" type="email" autocomplete="username" required></div><div><label class="text-xs font-medium text-gray-600 block mb-1">Senha</label><input id="sgt-login-password" class="sgt-auth-input" type="password" autocomplete="current-password" required></div><p id="sgt-login-error" class="text-sm text-red-600 hidden"></p><button id="sgt-login-btn" class="w-full py-2.5 rounded-lg text-white text-sm font-medium" style="background:#1e3a5f">Entrar</button></form></div>`;
+  document.body.appendChild(overlay); lucide.createIcons();
+  const form=document.getElementById('sgt-login-form'), err=document.getElementById('sgt-login-error'), btn=document.getElementById('sgt-login-btn');
+  async function enter(session){
+    overlay.classList.add('hidden');
+    const em=document.getElementById('sgt-user-email'); const out=document.getElementById('sgt-logout');
+    if(em){em.textContent=session?.user?.email||'';em.classList.remove('hidden')}; if(out)out.classList.remove('hidden');
+    if(!window.sgtAppStarted){window.sgtAppStarted=true;const r=await init();if(r?.isOk){setTrocaForm();rTrocas()}if(!r?.isOk){window.sgtAppStarted=false;overlay.classList.remove('hidden');if(err){const msg=r?.error?.message||'Não foi possível carregar o sistema.';err.textContent='Erro de inicialização: '+msg;err.classList.remove('hidden')}}}
+  }
+  form.addEventListener('submit',async ev=>{ev.preventDefault();err.classList.add('hidden');btn.disabled=true;btn.textContent='Entrando...';const {data,error}=await window.sgtAuth.sb.auth.signInWithPassword({email:document.getElementById('sgt-login-email').value.trim(),password:document.getElementById('sgt-login-password').value});btn.disabled=false;btn.textContent='Entrar';if(error){err.textContent='Login não realizado: '+error.message;err.classList.remove('hidden');return}await enter(data.session)});
+  window.sgtLogout=async()=>{await window.sgtAuth.signOut();window.sgtAppStarted=false;document.getElementById('sgt-user-email')?.classList.add('hidden');document.getElementById('sgt-logout')?.classList.add('hidden');overlay.classList.remove('hidden');document.getElementById('sgt-login-password').value='';};
+  const {data:{session}}=await window.sgtAuth.sb.auth.getSession();
+  if(session) await enter(session);
+  window.sgtAuth.sb.auth.onAuthStateChange(async(event,session)=>{if(event==='SIGNED_OUT'){overlay.classList.remove('hidden');}else if(event==='SIGNED_IN'&&session&&!window.sgtAppStarted){await enter(session)}});
+}
+bootAuth();
+</script>
+ 
+</body></html>
