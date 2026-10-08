@@ -1,0 +1,805 @@
+-- SGT Enterprise
+-- Modelo inicial PostgreSQL / Supabase
+-- Gerado a partir do modelo de dados efetivamente usado pelo HTML enviado.
+--
+-- IMPORTANTE:
+-- 1) Execute no SQL Editor do Supabase.
+-- 2) As tabelas ficam protegidas por RLS.
+-- 3) A autenticação será configurada na próxima etapa; por enquanto
+--    as políticas de aplicação ficam separadas para não abrir o banco.
+
+create extension if not exists pgcrypto;
+
+create table if not exists public.impressoras (
+  id uuid primary key default gen_random_uuid(),
+  setor text not null,
+  fabricante text not null,
+  modelo text not null,
+  nome_exibicao text not null,
+  cor_tipo text,
+  status text not null default 'EM USO',
+  ip text,
+  mac text,
+  numero_serie text,
+  patrimonio text,
+  localizacao text,
+  observacoes text,
+  ativo boolean not null default true,
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now()
+);
+
+create unique index if not exists ux_impressoras_numero_serie
+  on public.impressoras (numero_serie)
+  where numero_serie is not null and numero_serie <> '';
+
+create table if not exists public.solicitacoes (
+  id uuid primary key default gen_random_uuid(),
+  impressora_id uuid not null references public.impressoras(id),
+  toner_modelo text not null,
+  nome_suprimento text,
+  status text not null default 'PENDENTE',
+  responsavel text,
+  observacoes text,
+  data_solicitacao date not null default current_date,
+  data_analise date,
+  motivo_negativa text,
+  deletado boolean not null default false,
+  data_delecao timestamptz,
+  data_edicao timestamptz,
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now()
+);
+
+create index if not exists ix_solicitacoes_impressora
+  on public.solicitacoes (impressora_id);
+
+create index if not exists ix_solicitacoes_status
+  on public.solicitacoes (status);
+
+create table if not exists public.justificativas (
+  id uuid primary key default gen_random_uuid(),
+  impressora_id uuid not null references public.impressoras(id),
+  nome_suprimento text,
+  toner_modelo text,
+  cor_negada text,
+  vida_util_copias integer not null default 0,
+  contador_atual integer not null default 0,
+  ultima_troca_req integer not null default 0,
+  data_ultima_troca date,
+  saldo_produzido numeric(14,2) not null default 0,
+  pct_produzido numeric(8,2) not null default 0,
+  pct_permitido numeric(8,2) not null default 0,
+  pct_faltante numeric(8,2) not null default 0,
+  copias_faltantes numeric(14,2) not null default 0,
+  previsao_nova_tentativa date,
+  status text,
+  tipo_analise text,
+  motivo_negativa text,
+  responsavel text,
+  data_solicitacao date,
+  data_analise date,
+  observacoes text,
+  deletado boolean not null default false,
+  data_delecao timestamptz,
+  data_edicao timestamptz,
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now()
+);
+
+create index if not exists ix_justificativas_impressora
+  on public.justificativas (impressora_id);
+
+create table if not exists public.movimentacoes_estoque (
+  id uuid primary key default gen_random_uuid(),
+  impressora_id uuid not null references public.impressoras(id),
+  toner_modelo text not null,
+  nome_suprimento text,
+  cor text,
+  entrada integer not null default 0,
+  saida integer not null default 0,
+  data_movimentacao timestamptz not null default now(),
+  ref_solicitacao_id uuid references public.solicitacoes(id),
+  observacoes text,
+  deletado boolean not null default false,
+  data_delecao timestamptz,
+  data_edicao timestamptz,
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now(),
+  constraint ck_movimentacao_quantidade check (
+    entrada >= 0 and saida >= 0 and (entrada > 0 or saida > 0)
+  )
+);
+
+create index if not exists ix_estoque_impressora
+  on public.movimentacoes_estoque (impressora_id);
+
+create index if not exists ix_estoque_toner
+  on public.movimentacoes_estoque (toner_modelo);
+
+create table if not exists public.historico (
+  id uuid primary key default gen_random_uuid(),
+  impressora_id uuid references public.impressoras(id),
+  solicitacao_id uuid references public.solicitacoes(id),
+  justificativa_id uuid references public.justificativas(id),
+  nome_suprimento text,
+  status_anterior text,
+  novo_status text,
+  motivo_negativa text,
+  responsavel text,
+  observacoes text,
+  tipo_evento text,
+  data_evento timestamptz not null default now(),
+  deletado boolean not null default false,
+  data_delecao timestamptz,
+  data_edicao timestamptz,
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now()
+);
+
+create index if not exists ix_historico_impressora
+  on public.historico (impressora_id);
+
+create index if not exists ix_historico_data
+  on public.historico (data_evento desc);
+
+create table if not exists public.configuracoes (
+  id integer primary key default 1,
+  intervalo_min integer not null default 15,
+  janela_seg integer not null default 7,
+  peso_neg integer not null default 5,
+  limite_risco integer not null default 3,
+  consumo_medio integer not null default 60,
+  regra_tentativa integer not null default 30,
+  atualizado_em timestamptz not null default now(),
+  constraint ck_config_id check (id = 1)
+);
+
+insert into public.configuracoes (id)
+values (1)
+on conflict (id) do nothing;
+
+-- Função simples para manter atualizado_em.
+create or replace function public.set_atualizado_em()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.atualizado_em = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_impressoras_atualizado_em on public.impressoras;
+create trigger trg_impressoras_atualizado_em
+before update on public.impressoras
+for each row execute function public.set_atualizado_em();
+
+drop trigger if exists trg_solicitacoes_atualizado_em on public.solicitacoes;
+create trigger trg_solicitacoes_atualizado_em
+before update on public.solicitacoes
+for each row execute function public.set_atualizado_em();
+
+drop trigger if exists trg_justificativas_atualizado_em on public.justificativas;
+create trigger trg_justificativas_atualizado_em
+before update on public.justificativas
+for each row execute function public.set_atualizado_em();
+
+drop trigger if exists trg_estoque_atualizado_em on public.movimentacoes_estoque;
+create trigger trg_estoque_atualizado_em
+before update on public.movimentacoes_estoque
+for each row execute function public.set_atualizado_em();
+
+drop trigger if exists trg_historico_atualizado_em on public.historico;
+create trigger trg_historico_atualizado_em
+before update on public.historico
+for each row execute function public.set_atualizado_em();
+
+drop trigger if exists trg_configuracoes_atualizado_em on public.configuracoes;
+create trigger trg_configuracoes_atualizado_em
+before update on public.configuracoes
+for each row execute function public.set_atualizado_em();
+
+-- View para o saldo atual de estoque.
+create or replace view public.saldo_estoque as
+select
+  m.impressora_id,
+  m.toner_modelo,
+  coalesce(m.cor, '') as cor,
+  sum(m.entrada) as entradas,
+  sum(m.saida) as saidas,
+  sum(m.entrada - m.saida) as saldo
+from public.movimentacoes_estoque m
+where not m.deletado
+group by m.impressora_id, m.toner_modelo, coalesce(m.cor, '');
+
+-- RLS: nenhuma tabela exposta fica aberta por padrão.
+alter table public.impressoras enable row level security;
+alter table public.solicitacoes enable row level security;
+alter table public.justificativas enable row level security;
+alter table public.movimentacoes_estoque enable row level security;
+alter table public.historico enable row level security;
+alter table public.configuracoes enable row level security;
+
+-- Não criamos políticas anon ainda.
+-- A próxima etapa configura Supabase Auth + políticas para o usuário autenticado.
+-- Isso evita colocar o banco inteiro publicamente acessível no GitHub Pages.
+
+-- Dados iniciais de configuração usados pelo sistema atual:
+update public.configuracoes
+set intervalo_min = 15,
+    janela_seg = 7,
+    peso_neg = 5,
+    limite_risco = 3,
+    consumo_medio = 60,
+    regra_tentativa = 30
+where id = 1;
+
+
+
+ALTER TABLE public.solicitacoes ADD COLUMN IF NOT EXISTS cor text;
+
+
+-- ============================================================
+-- ACESSO DA API — USUÁRIOS AUTENTICADOS
+-- ============================================================
+GRANT USAGE ON SCHEMA public TO authenticated;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.impressoras TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.solicitacoes TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.justificativas TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.movimentacoes_estoque TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.historico TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.configuracoes TO authenticated;
+
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['impressoras','solicitacoes','justificativas','movimentacoes_estoque','historico','configuracoes'] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('DROP POLICY IF EXISTS "SGT authenticated access" ON public.%I', t);
+    EXECUTE format('CREATE POLICY "SGT authenticated access" ON public.%I FOR ALL TO authenticated USING (true) WITH CHECK (true)', t);
+  END LOOP;
+END $$;
+
+-- SGT Enterprise — estoque atual independente do histórico + Realtime
+-- Versão corrigida: evita blocos IF soltos no SQL Editor.
+
+create table if not exists public.estoque_atual (
+  id uuid primary key default gen_random_uuid(),
+  impressora_id uuid not null references public.impressoras(id) on delete cascade,
+  cor text not null check (cor in ('CIANO','MAGENTA','AMARELO','PRETO')),
+  quantidade integer not null default 0 check (quantidade >= 0),
+  atualizado_em timestamptz not null default now(),
+  unique (impressora_id, cor)
+);
+
+alter table public.estoque_atual enable row level security;
+grant select, insert, update, delete on table public.estoque_atual to authenticated;
+
+drop policy if exists "SGT authenticated access" on public.estoque_atual;
+create policy "SGT authenticated access" on public.estoque_atual
+for all to authenticated
+using (true)
+with check (true);
+
+-- Reconstrói o estoque atual a partir das movimentações existentes.
+-- O histórico pode depois ser excluído sem alterar estes saldos.
+truncate table public.estoque_atual;
+
+insert into public.estoque_atual (impressora_id, cor, quantidade)
+select
+  impressora_id,
+  upper(cor) as cor,
+  greatest(0, sum(coalesce(entrada,0) - coalesce(saida,0)))::integer as quantidade
+from public.movimentacoes_estoque
+where cor is not null
+  and upper(cor) in ('CIANO','MAGENTA','AMARELO','PRETO')
+group by impressora_id, upper(cor)
+having greatest(0, sum(coalesce(entrada,0) - coalesce(saida,0))) > 0;
+
+create or replace function public.sgt_atualizar_estoque_atual()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $function$
+declare
+  delta_old integer := 0;
+  delta_new integer := 0;
+begin
+  -- Alteração: retira do saldo o efeito do registro antigo.
+  if TG_OP = 'UPDATE' then
+    if OLD.cor is not null then
+      delta_old := coalesce(OLD.entrada,0) - coalesce(OLD.saida,0);
+      if delta_old <> 0 then
+        insert into public.estoque_atual (impressora_id, cor, quantidade, atualizado_em)
+        values (OLD.impressora_id, upper(OLD.cor), 0, now())
+        on conflict (impressora_id, cor) do nothing;
+
+        update public.estoque_atual
+           set quantidade = greatest(0, quantidade - delta_old),
+               atualizado_em = now()
+         where impressora_id = OLD.impressora_id
+           and cor = upper(OLD.cor);
+      end if;
+    end if;
+  end if;
+
+  -- Entrada ou alteração: aplica o efeito do novo registro.
+  if TG_OP in ('INSERT','UPDATE') then
+    if NEW.cor is not null then
+      delta_new := coalesce(NEW.entrada,0) - coalesce(NEW.saida,0);
+      if delta_new <> 0 then
+        insert into public.estoque_atual (impressora_id, cor, quantidade, atualizado_em)
+        values (NEW.impressora_id, upper(NEW.cor), 0, now())
+        on conflict (impressora_id, cor) do nothing;
+
+        update public.estoque_atual
+           set quantidade = greatest(0, quantidade + delta_new),
+               atualizado_em = now()
+         where impressora_id = NEW.impressora_id
+           and cor = upper(NEW.cor);
+      end if;
+    end if;
+  end if;
+
+  -- DELETE não possui trigger de propósito: apagar histórico não altera estoque atual.
+  return coalesce(NEW, OLD);
+end;
+$function$;
+
+drop trigger if exists trg_sgt_atualizar_estoque_atual on public.movimentacoes_estoque;
+create trigger trg_sgt_atualizar_estoque_atual
+after insert or update on public.movimentacoes_estoque
+for each row execute function public.sgt_atualizar_estoque_atual();
+
+-- Realtime: execute estas linhas somente se as tabelas ainda não estiverem
+-- adicionadas à publicação supabase_realtime.
+-- Se alguma já estiver publicada, o Supabase informará que ela já existe;
+-- isso não afeta a tabela estoque_atual.
+
+DO $$ BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.estoque_atual;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+notify pgrst, 'reload schema';
+
+-- SGT Enterprise — Contadores contínuos e ciclos de toner
+-- Executar após o schema principal e o estoque_atual.
+
+ALTER TABLE public.solicitacoes
+  ADD COLUMN IF NOT EXISTS contador_atual integer;
+ALTER TABLE public.solicitacoes
+  ADD COLUMN IF NOT EXISTS contador_solicitacao integer;
+ALTER TABLE public.solicitacoes
+  ADD COLUMN IF NOT EXISTS contador_recebimento integer;
+
+CREATE TABLE IF NOT EXISTS public.leituras_contador (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  impressora_id uuid NOT NULL REFERENCES public.impressoras(id) ON DELETE CASCADE,
+  cor text NOT NULL CHECK (cor IN ('CIANO','MAGENTA','AMARELO','PRETO')),
+  contador integer NOT NULL CHECK (contador >= 0),
+  origem_tipo text NOT NULL CHECK (origem_tipo IN ('SOLICITACAO','RECEBIMENTO','JUSTIFICATIVA','MANUAL')),
+  origem_id uuid,
+  status_origem text,
+  data_leitura timestamptz NOT NULL DEFAULT now(),
+  observacoes text,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (origem_tipo, origem_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_leituras_contador_impressora_cor_data
+  ON public.leituras_contador(impressora_id, cor, data_leitura DESC);
+
+CREATE TABLE IF NOT EXISTS public.ciclos_toner (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  impressora_id uuid NOT NULL REFERENCES public.impressoras(id) ON DELETE CASCADE,
+  cor text NOT NULL CHECK (cor IN ('CIANO','MAGENTA','AMARELO','PRETO')),
+  solicitacao_recebida_id uuid NOT NULL REFERENCES public.solicitacoes(id) ON DELETE CASCADE,
+  leitura_inicio_id uuid REFERENCES public.leituras_contador(id) ON DELETE SET NULL,
+  leitura_fim_id uuid REFERENCES public.leituras_contador(id) ON DELETE SET NULL,
+  contador_inicio integer,
+  contador_fim integer NOT NULL CHECK (contador_fim >= 0),
+  copias_produzidas integer,
+  data_inicio timestamptz,
+  data_fim timestamptz NOT NULL,
+  dias_duracao numeric(12,2),
+  observacoes text,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (solicitacao_recebida_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ciclos_toner_impressora_cor_data
+  ON public.ciclos_toner(impressora_id, cor, data_fim DESC);
+
+CREATE OR REPLACE FUNCTION public.sgt_touch_atualizado_em()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.atualizado_em := now();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_leituras_contador_updated_at ON public.leituras_contador;
+CREATE TRIGGER trg_leituras_contador_updated_at
+BEFORE UPDATE ON public.leituras_contador
+FOR EACH ROW EXECUTE FUNCTION public.sgt_touch_atualizado_em();
+
+DROP TRIGGER IF EXISTS trg_ciclos_toner_updated_at ON public.ciclos_toner;
+CREATE TRIGGER trg_ciclos_toner_updated_at
+BEFORE UPDATE ON public.ciclos_toner
+FOR EACH ROW EXECUTE FUNCTION public.sgt_touch_atualizado_em();
+
+CREATE OR REPLACE FUNCTION public.sgt_registrar_leitura_solicitacao()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  leitura_solicitacao_id uuid;
+  leitura_recebimento_id uuid;
+  anterior record;
+  copias integer;
+  dias numeric(12,2);
+  contador_req integer;
+  contador_rec integer;
+BEGIN
+  IF NEW.deletado IS TRUE THEN
+    RETURN NEW;
+  END IF;
+
+  contador_req := COALESCE(NEW.contador_solicitacao, NEW.contador_atual);
+  contador_rec := NEW.contador_recebimento;
+
+  -- A leitura do pedido fica preservada separadamente da leitura da troca.
+  IF contador_req IS NOT NULL
+     AND contador_req >= 0
+     AND NEW.cor IS NOT NULL
+     AND NEW.impressora_id IS NOT NULL THEN
+    INSERT INTO public.leituras_contador
+      (impressora_id, cor, contador, origem_tipo, origem_id, status_origem, data_leitura)
+    VALUES
+      (NEW.impressora_id, NEW.cor, contador_req, 'SOLICITACAO', NEW.id, NEW.status,
+       COALESCE(NEW.data_solicitacao::timestamptz, now()))
+    ON CONFLICT (origem_tipo, origem_id) DO UPDATE SET
+      impressora_id = EXCLUDED.impressora_id,
+      cor = EXCLUDED.cor,
+      contador = EXCLUDED.contador,
+      status_origem = EXCLUDED.status_origem,
+      data_leitura = EXCLUDED.data_leitura;
+
+    SELECT id INTO leitura_solicitacao_id
+      FROM public.leituras_contador
+     WHERE origem_tipo='SOLICITACAO' AND origem_id=NEW.id;
+  END IF;
+
+  -- O recebimento é uma segunda leitura, nunca substitui a leitura do pedido.
+  IF NEW.status = 'RECEBIDO'
+     AND contador_rec IS NOT NULL
+     AND contador_rec >= 0
+     AND NEW.cor IS NOT NULL
+     AND NEW.impressora_id IS NOT NULL THEN
+
+    INSERT INTO public.leituras_contador
+      (impressora_id, cor, contador, origem_tipo, origem_id, status_origem, data_leitura)
+    VALUES
+      (NEW.impressora_id, NEW.cor, contador_rec, 'RECEBIMENTO', NEW.id, NEW.status,
+       COALESCE(NEW.data_analise::timestamptz, now()))
+    ON CONFLICT (origem_tipo, origem_id) DO UPDATE SET
+      impressora_id = EXCLUDED.impressora_id,
+      cor = EXCLUDED.cor,
+      contador = EXCLUDED.contador,
+      status_origem = EXCLUDED.status_origem,
+      data_leitura = EXCLUDED.data_leitura;
+
+    SELECT id INTO leitura_recebimento_id
+      FROM public.leituras_contador
+     WHERE origem_tipo='RECEBIMENTO' AND origem_id=NEW.id;
+
+    SELECT s.id,
+           s.contador_recebimento,
+           s.data_analise,
+           lc.id AS leitura_id
+      INTO anterior
+      FROM public.solicitacoes s
+      LEFT JOIN public.leituras_contador lc
+        ON lc.origem_tipo='RECEBIMENTO' AND lc.origem_id=s.id
+     WHERE s.impressora_id=NEW.impressora_id
+       AND s.cor=NEW.cor
+       AND s.status='RECEBIDO'
+       AND s.deletado IS NOT TRUE
+       AND s.id<>NEW.id
+       AND s.contador_recebimento IS NOT NULL
+       AND s.contador_recebimento <= contador_rec
+       AND (s.data_analise < NEW.data_analise OR (s.data_analise = NEW.data_analise AND s.id < NEW.id))
+     ORDER BY s.data_analise DESC NULLS LAST, s.id DESC
+     LIMIT 1;
+
+    IF anterior.id IS NOT NULL THEN
+      copias := contador_rec - anterior.contador_recebimento;
+      dias := GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(NEW.data_analise::timestamptz, now()) - COALESCE(anterior.data_analise::timestamptz, now()))) / 86400.0);
+    ELSE
+      copias := NULL;
+      dias := NULL;
+    END IF;
+
+    INSERT INTO public.ciclos_toner
+      (impressora_id, cor, solicitacao_recebida_id, leitura_inicio_id, leitura_fim_id,
+       contador_inicio, contador_fim, copias_produzidas, data_inicio, data_fim, dias_duracao)
+    VALUES
+      (NEW.impressora_id, NEW.cor, NEW.id, anterior.leitura_id, leitura_recebimento_id,
+       anterior.contador_recebimento, contador_rec, copias,
+       anterior.data_analise::timestamptz, COALESCE(NEW.data_analise::timestamptz, now()), dias)
+    ON CONFLICT (solicitacao_recebida_id) DO UPDATE SET
+      leitura_inicio_id=EXCLUDED.leitura_inicio_id,
+      leitura_fim_id=EXCLUDED.leitura_fim_id,
+      contador_inicio=EXCLUDED.contador_inicio,
+      contador_fim=EXCLUDED.contador_fim,
+      copias_produzidas=EXCLUDED.copias_produzidas,
+      data_inicio=EXCLUDED.data_inicio,
+      data_fim=EXCLUDED.data_fim,
+      dias_duracao=EXCLUDED.dias_duracao;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_sgt_contador_solicitacao ON public.solicitacoes;
+CREATE TRIGGER trg_sgt_contador_solicitacao
+AFTER INSERT OR UPDATE OF contador_atual, contador_solicitacao, contador_recebimento, cor, status, data_analise, data_solicitacao, deletado
+ON public.solicitacoes
+FOR EACH ROW EXECUTE FUNCTION public.sgt_registrar_leitura_solicitacao();
+
+CREATE OR REPLACE FUNCTION public.sgt_registrar_leitura_justificativa()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NEW.deletado IS NOT TRUE
+     AND NEW.contador_atual IS NOT NULL
+     AND NEW.contador_atual >= 0
+     AND NEW.cor_negada IS NOT NULL
+     AND NEW.impressora_id IS NOT NULL THEN
+    INSERT INTO public.leituras_contador
+      (impressora_id, cor, contador, origem_tipo, origem_id, status_origem, data_leitura)
+    VALUES
+      (NEW.impressora_id, NEW.cor_negada, NEW.contador_atual, 'JUSTIFICATIVA', NEW.id, NEW.status, COALESCE(NEW.data_analise::timestamptz, NEW.data_solicitacao::timestamptz, now()))
+    ON CONFLICT (origem_tipo, origem_id) DO UPDATE SET
+      impressora_id=EXCLUDED.impressora_id,
+      cor=EXCLUDED.cor,
+      contador=EXCLUDED.contador,
+      status_origem=EXCLUDED.status_origem,
+      data_leitura=EXCLUDED.data_leitura;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_sgt_contador_justificativa ON public.justificativas;
+CREATE TRIGGER trg_sgt_contador_justificativa
+AFTER INSERT OR UPDATE OF contador_atual, cor_negada, status, data_analise, data_solicitacao, deletado
+ON public.justificativas
+FOR EACH ROW EXECUTE FUNCTION public.sgt_registrar_leitura_justificativa();
+
+ALTER TABLE public.leituras_contador ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ciclos_toner ENABLE ROW LEVEL SECURITY;
+GRANT USAGE ON SCHEMA public TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.leituras_contador TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.ciclos_toner TO authenticated;
+DROP POLICY IF EXISTS "SGT authenticated access" ON public.leituras_contador;
+DROP POLICY IF EXISTS "SGT authenticated access" ON public.ciclos_toner;
+CREATE POLICY "SGT authenticated access" ON public.leituras_contador FOR ALL TO authenticated USING (true) WITH CHECK (true);
+CREATE POLICY "SGT authenticated access" ON public.ciclos_toner FOR ALL TO authenticated USING (true) WITH CHECK (true);
+GRANT EXECUTE ON FUNCTION public.sgt_registrar_leitura_solicitacao() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.sgt_registrar_leitura_justificativa() TO authenticated;
+
+ALTER TABLE public.leituras_contador REPLICA IDENTITY FULL;
+ALTER TABLE public.ciclos_toner REPLICA IDENTITY FULL;
+DO $$ BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.leituras_contador;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.ciclos_toner;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+NOTIFY pgrst, 'reload schema';
+
+-- SGT Enterprise — Registro de troca real e previsão por histórico
+-- Executar após 08-contadores-e-ciclos.sql
+
+ALTER TABLE public.leituras_contador
+  DROP CONSTRAINT IF EXISTS leituras_contador_origem_tipo_check;
+
+ALTER TABLE public.leituras_contador
+  ADD CONSTRAINT leituras_contador_origem_tipo_check
+  CHECK (origem_tipo IN ('SOLICITACAO','RECEBIMENTO','JUSTIFICATIVA','TROCA','MANUAL'));
+
+CREATE TABLE IF NOT EXISTS public.trocas_toner (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  impressora_id uuid NOT NULL REFERENCES public.impressoras(id) ON DELETE CASCADE,
+  cor text NOT NULL CHECK (cor IN ('CIANO','MAGENTA','AMARELO','PRETO')),
+  data_troca timestamptz NOT NULL,
+  contador_troca integer CHECK (contador_troca IS NULL OR contador_troca >= 0),
+  solicitacao_id uuid REFERENCES public.solicitacoes(id) ON DELETE SET NULL,
+  observacoes text,
+  deletado boolean NOT NULL DEFAULT false,
+  data_delecao timestamptz,
+  criado_em timestamptz NOT NULL DEFAULT now(),
+  atualizado_em timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_trocas_toner_impressora_cor_data
+  ON public.trocas_toner(impressora_id, cor, data_troca DESC);
+
+ALTER TABLE public.ciclos_toner
+  ALTER COLUMN solicitacao_recebida_id DROP NOT NULL;
+
+ALTER TABLE public.ciclos_toner
+  ADD COLUMN IF NOT EXISTS troca_inicio_id uuid REFERENCES public.trocas_toner(id) ON DELETE SET NULL;
+
+ALTER TABLE public.ciclos_toner
+  ADD COLUMN IF NOT EXISTS troca_fim_id uuid REFERENCES public.trocas_toner(id) ON DELETE SET NULL;
+
+ALTER TABLE public.ciclos_toner
+  ADD COLUMN IF NOT EXISTS tipo_ciclo text NOT NULL DEFAULT 'RECEBIMENTO';
+
+ALTER TABLE public.ciclos_toner
+  ADD COLUMN IF NOT EXISTS deletado boolean NOT NULL DEFAULT false;
+
+ALTER TABLE public.ciclos_toner
+  ADD COLUMN IF NOT EXISTS data_delecao timestamptz;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ciclos_toner_troca_fim
+  ON public.ciclos_toner(troca_fim_id)
+  WHERE troca_fim_id IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_trocas_toner_updated_at ON public.trocas_toner;
+CREATE TRIGGER trg_trocas_toner_updated_at
+BEFORE UPDATE ON public.trocas_toner
+FOR EACH ROW EXECUTE FUNCTION public.sgt_touch_atualizado_em();
+
+CREATE OR REPLACE FUNCTION public.sgt_registrar_troca_toner()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  leitura_troca_id uuid;
+  anterior record;
+  ciclo_existente uuid;
+  copias integer;
+  dias numeric(12,2);
+BEGIN
+  IF NEW.deletado IS TRUE THEN
+    UPDATE public.ciclos_toner
+       SET deletado=true, data_delecao=COALESCE(NEW.data_delecao, now())
+     WHERE troca_fim_id=NEW.id;
+    RETURN NEW;
+  END IF;
+
+  UPDATE public.ciclos_toner
+     SET deletado=false, data_delecao=NULL
+   WHERE troca_fim_id=NEW.id;
+
+  IF NEW.contador_troca IS NOT NULL THEN
+    INSERT INTO public.leituras_contador
+      (impressora_id, cor, contador, origem_tipo, origem_id, status_origem, data_leitura, observacoes)
+    VALUES
+      (NEW.impressora_id, NEW.cor, NEW.contador_troca, 'TROCA', NEW.id, 'TROCA', NEW.data_troca, NEW.observacoes)
+    ON CONFLICT (origem_tipo, origem_id) DO UPDATE SET
+      impressora_id=EXCLUDED.impressora_id,
+      cor=EXCLUDED.cor,
+      contador=EXCLUDED.contador,
+      status_origem=EXCLUDED.status_origem,
+      data_leitura=EXCLUDED.data_leitura,
+      observacoes=EXCLUDED.observacoes;
+
+    SELECT id INTO leitura_troca_id
+      FROM public.leituras_contador
+     WHERE origem_tipo='TROCA' AND origem_id=NEW.id;
+  END IF;
+
+  SELECT t.id, t.data_troca, t.contador_troca, lc.id AS leitura_id
+    INTO anterior
+    FROM public.trocas_toner t
+    LEFT JOIN public.leituras_contador lc
+      ON lc.origem_tipo='TROCA' AND lc.origem_id=t.id
+   WHERE t.impressora_id=NEW.impressora_id
+     AND t.cor=NEW.cor
+     AND t.deletado IS NOT TRUE
+     AND t.id<>NEW.id
+     AND t.data_troca <= NEW.data_troca
+   ORDER BY t.data_troca DESC, t.id DESC
+   LIMIT 1;
+
+  IF anterior.id IS NOT NULL THEN
+    IF NEW.contador_troca IS NOT NULL AND anterior.contador_troca IS NOT NULL
+       AND NEW.contador_troca >= anterior.contador_troca THEN
+      copias := NEW.contador_troca - anterior.contador_troca;
+    ELSE
+      copias := NULL;
+    END IF;
+
+    dias := GREATEST(0, EXTRACT(EPOCH FROM (NEW.data_troca - anterior.data_troca)) / 86400.0);
+
+    SELECT id INTO ciclo_existente
+      FROM public.ciclos_toner
+     WHERE troca_fim_id=NEW.id
+     LIMIT 1;
+
+    IF ciclo_existente IS NOT NULL THEN
+      UPDATE public.ciclos_toner SET
+        impressora_id=NEW.impressora_id,
+        cor=NEW.cor,
+        solicitacao_recebida_id=NEW.solicitacao_id,
+        leitura_inicio_id=anterior.leitura_id,
+        leitura_fim_id=leitura_troca_id,
+        contador_inicio=anterior.contador_troca,
+        contador_fim=NEW.contador_troca,
+        copias_produzidas=copias,
+        data_inicio=anterior.data_troca,
+        data_fim=NEW.data_troca,
+        dias_duracao=dias,
+        troca_inicio_id=anterior.id,
+        tipo_ciclo='TROCA'
+      WHERE id=ciclo_existente;
+    ELSE
+      INSERT INTO public.ciclos_toner
+        (impressora_id, cor, solicitacao_recebida_id, leitura_inicio_id, leitura_fim_id,
+         contador_inicio, contador_fim, copias_produzidas, data_inicio, data_fim,
+         dias_duracao, troca_inicio_id, troca_fim_id, tipo_ciclo)
+      VALUES
+        (NEW.impressora_id, NEW.cor, NEW.solicitacao_id, anterior.leitura_id, leitura_troca_id,
+         anterior.contador_troca, NEW.contador_troca, copias, anterior.data_troca, NEW.data_troca,
+         dias, anterior.id, NEW.id, 'TROCA');
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_sgt_troca_toner ON public.trocas_toner;
+CREATE TRIGGER trg_sgt_troca_toner
+AFTER INSERT OR UPDATE OF impressora_id, cor, data_troca, contador_troca, solicitacao_id, observacoes, deletado
+ON public.trocas_toner
+FOR EACH ROW EXECUTE FUNCTION public.sgt_registrar_troca_toner();
+
+ALTER TABLE public.trocas_toner ENABLE ROW LEVEL SECURITY;
+GRANT USAGE ON SCHEMA public TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.trocas_toner TO authenticated;
+DROP POLICY IF EXISTS "SGT authenticated access" ON public.trocas_toner;
+CREATE POLICY "SGT authenticated access" ON public.trocas_toner
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+GRANT EXECUTE ON FUNCTION public.sgt_registrar_troca_toner() TO authenticated;
+
+ALTER TABLE public.trocas_toner REPLICA IDENTITY FULL;
+DO $$ BEGIN
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.trocas_toner;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+NOTIFY pgrst, 'reload schema';
+
+
+-- ============================================================
+-- DADOS INICIAIS — SALVADOR
+-- ============================================================
+INSERT INTO public.impressoras
+  (setor, fabricante, modelo, nome_exibicao, cor_tipo, status, ip, mac, numero_serie, patrimonio, ativo)
+VALUES
+  ('CHECK-IN',    'CANON',   'CANON GX 7000', 'CANON GX 7000 (CHECK-IN)',    'COLORIDA',       'EM USO', '172.50.0.202',                  '40:F8:DF:BD:00:39', 'KNDX14444',          'SPSCOM', true),
+  ('SUPRIMENTOS', 'SAMSUNG', 'SL-M4070',      'SAMSUNG SL-M4070 (SUPRIMENTOS)', 'PRETO E BRANCO', 'EM USO', '172.50.0.3',                    '30:CD:A7:CB:D5:20', 'ZDDPBQAH8000PTL',   'SPSCOM', true),
+  ('PILOTOS',     'CANON',   'CANON GX 7000', 'CANON GX 7000 (PILOTOS)',     'COLORIDA',       'EM USO', '172.50.0.201',                  'DC:C2:C9:A1:05:0B', 'KNDW24063',          'SPSCOM', true),
+  ('MANUTENÇÃO',  'KYOCERA', 'M2040DN',       'KYOCERA M2040DN (MANUTENÇÃO)', 'PRETO E BRANCO', 'EM USO', '192.168.10.7 / 172.50.0.200',   '00:17:C8:95:07:BE', 'VR99762697',         'SPSCOM', true)
+ON CONFLICT DO NOTHING;
+
+-- Garante uma configuração inicial coerente com a nova previsão por ciclos reais.
+INSERT INTO public.configuracoes
+  (id, intervalo_min, janela_seg, peso_neg, limite_risco, consumo_medio, regra_tentativa)
+VALUES
+  (1, 2, 10, 0, 3, 0, 30)
+ON CONFLICT (id) DO UPDATE SET
+  intervalo_min = EXCLUDED.intervalo_min,
+  janela_seg = EXCLUDED.janela_seg,
+  peso_neg = EXCLUDED.peso_neg,
+  limite_risco = EXCLUDED.limite_risco,
+  consumo_medio = EXCLUDED.consumo_medio,
+  regra_tentativa = EXCLUDED.regra_tentativa;
+
+NOTIFY pgrst, 'reload schema';
